@@ -1,9 +1,9 @@
 // Service worker : tout le code de l'app est mis en cache → fonctionnement 100 % hors ligne.
 // Pour publier une mise à jour : modifier CACHE (ex. v1.0.1), puis rouvrir l'app 2 fois.
-const CACHE = 'prt-hse-v2.4.0';
+const CACHE = 'prt-hse-v3.5.0';
 const FILES = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
-  'js/app.js', 'js/calc.js', 'js/db.js', 'js/export.js', 'js/images.js', 'js/plan.js', 'js/prt-data.js', 'js/cloud.js', 'js/config.js', 'js/seed.js', 'js/icons.js', 'assets/plan-sam2a.jpg',
+  'js/app.js', 'js/calc.js', 'js/db.js', 'js/export.js', 'js/images.js', 'js/plan.js', 'js/prt-data.js', 'js/cloud.js', 'js/config.js', 'js/seed.js', 'js/icons.js', 'js/report-fr.js', 'assets/plan-sam2a.jpg',
   'vendor/xlsx.full.min.js', 'vendor/jspdf.umd.min.js', 'vendor/jspdf.plugin.autotable.min.js', 'vendor/pdf.min.js', 'vendor/pdf.worker.min.js', 'vendor/supabase.js',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-512-maskable.png', 'icons/apple-touch-icon.png',
 ];

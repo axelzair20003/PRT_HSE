@@ -3,7 +3,7 @@ import { ic } from './icons.js';
 // Coordonnées des épingles normalisées (0–1) par rapport à l'image du plan.
 
 export function createPlanViewer(container, opts) {
-  const { imageURL, onTap, onPinTap } = opts;
+  const { imageURL, onTap, onPinTap, onPinMove } = opts;
   let pins = opts.pins || [];
   container.classList.add('pv');
   container.innerHTML = `
@@ -60,6 +60,7 @@ export function createPlanViewer(container, opts) {
 
   // --- gestes ---
   const pts = new Map();
+  let holdTimer = null, dragPin = null;
   let start = null, last = null, multi = false;
   const rel = e => { const r = container.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
 
@@ -67,14 +68,26 @@ export function createPlanViewer(container, opts) {
     if (e.target.closest('.pv-ctrl')) return;
     container.setPointerCapture?.(e.pointerId);
     pts.set(e.pointerId, rel(e));
-    if (pts.size === 1) { start = { ...rel(e), t: Date.now(), target: e.target }; multi = false; }
-    if (pts.size === 2) multi = true;
+    if (pts.size === 1) {
+      start = { ...rel(e), t: Date.now(), target: e.target }; multi = false;
+      const pinEl = e.target.closest?.('.pin');
+      if (pinEl && onPinMove) {
+        clearTimeout(holdTimer);
+        holdTimer = setTimeout(() => { dragPin = { el: pinEl, pin: pins.find(q => q.id === pinEl.dataset.pid) }; pinEl.classList.add('pin-drag'); navigator.vibrate?.(25); }, 350);
+      }
+    }
+    if (pts.size === 2) { multi = true; clearTimeout(holdTimer); }
     last = [...pts.values()].map(p => ({ ...p }));
   });
   container.addEventListener('pointermove', e => {
     if (!pts.has(e.pointerId)) return;
     pts.set(e.pointerId, rel(e));
     const cur = [...pts.values()];
+    if (dragPin && cur.length === 1) { // l'épingle suit le doigt
+      const q = cur[0]; dragPin.el.style.left = (q.x - tx) / s + 'px'; dragPin.el.style.top = (q.y - ty) / s + 'px';
+      last = cur.map(p => ({ ...p })); return;
+    }
+    if (start && Math.hypot(cur[0].x - start.x, cur[0].y - start.y) > 8) clearTimeout(holdTimer);
     if (cur.length === 1 && last.length === 1) {
       tx += cur[0].x - last[0].x; ty += cur[0].y - last[0].y; apply();
     } else if (cur.length === 2 && last.length === 2) {
@@ -90,6 +103,12 @@ export function createPlanViewer(container, opts) {
     if (!pts.has(e.pointerId)) return;
     const p = rel(e);
     pts.delete(e.pointerId);
+    clearTimeout(holdTimer);
+    if (dragPin) {
+      const d = dragPin; dragPin = null; d.el.classList.remove('pin-drag'); start = null;
+      const x = Math.min(1, Math.max(0, (p.x - tx) / s / W)), y = Math.min(1, Math.max(0, (p.y - ty) / s / H));
+      d.pin.x = x; d.pin.y = y; onPinMove(d.pin, x, y); return;
+    }
     last = [...pts.values()].map(q => ({ ...q }));
     if (pts.size === 0 && start && !multi) {
       const moved = Math.hypot(p.x - start.x, p.y - start.y);

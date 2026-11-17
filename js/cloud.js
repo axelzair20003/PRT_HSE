@@ -10,7 +10,8 @@ let sb = null;
 export let session = null;
 export let profile = null;
 
-const KIND = { inspections: 'inspection', actions: 'action', subs: 'sub', plans: 'plan' };
+const KIND = { projects: 'project', inspections: 'inspection', actions: 'action', subs: 'sub', plans: 'plan' };
+const ADMIN_ONLY = ['subs', 'plans', 'projects'];
 const STORE = Object.fromEntries(Object.entries(KIND).map(([k, v]) => [v, k]));
 
 // ---------- état de synchro (affiché dans l'app) ----------
@@ -81,7 +82,7 @@ async function afterLogin() {
     for (const r of await db.all(store, { includeDeleted: true })) if (!r.owner) await db.put(store, { ...r, owner: uid() });
   }
   if (!isAdmin()) { // l'inspecteur reçoit les sous-traitants/plans du serveur
-    for (const store of ['subs', 'plans']) {
+    for (const store of ADMIN_ONLY) {
       const ids = (await db.outboxAll()).filter(o => o.store === store).map(o => o.seq);
       await db.outboxClear(ids);
     }
@@ -119,8 +120,8 @@ export function sync() {
 }
 
 const photosOf = (store, r) => store === 'inspections' ? Object.values(r.scores || {}).flatMap(s => s?.photos || [])
-  : store === 'actions' ? (r.photos || []) : store === 'plans' ? [r.blobId] : store === 'subs' ? [r.logoId] : [];
-const blobPath = (store, owner, id) => (store === 'plans' || store === 'subs') ? { bucket: 'shared', path: id } : { bucket: 'photos', path: `${owner}/${id}` };
+  : store === 'actions' ? [...(r.photos || []), ...(r.photosAfter || [])] : store === 'plans' ? [r.blobId] : (store === 'subs' || store === 'projects') ? [r.logoId] : [];
+const blobPath = (store, owner, id) => ADMIN_ONLY.includes(store) ? { bucket: 'shared', path: id } : { bucket: 'photos', path: `${owner}/${id}` };
 
 async function push() {
   const out = await db.outboxAll();
@@ -135,11 +136,12 @@ async function push() {
     const { store, recordId } = list[0];
     const seqs = list.map(o => o.seq);
     const rec = await db.get(store, recordId);
-    if (!rec || ((store === 'subs' || store === 'plans') && !isAdmin())) { done.push(...seqs); continue; }
+    if (!rec || (ADMIN_ONLY.includes(store) && !isAdmin())) { done.push(...seqs); continue; }
     const owner = rec.owner || uid();
     for (const id of photosOf(store, rec).filter(Boolean)) await uploadBlob(id, blobPath(store, owner, id));
     const { error } = await sb.from('docs').upsert({
-      id: rec.id, kind: KIND[store], owner, data: { ...rec, owner }, updated_at: rec.updatedAt || new Date().toISOString(), deleted: !!rec.deleted,
+      id: rec.id, kind: KIND[store], owner, project: store === 'projects' ? rec.id : (rec.projectId || null),
+      data: { ...rec, owner }, updated_at: rec.updatedAt || new Date().toISOString(), deleted: !!rec.deleted,
     });
     if (error) throw error;
     done.push(...seqs);
@@ -193,8 +195,19 @@ export async function team() {
   await db.setMeta('profiles', Object.fromEntries(p.data.map(x => [x.id, { name: x.name, email: x.email }])));
   return { profiles: p.data, invites: i.data };
 }
-export async function invite(email, name, role = 'inspector') {
-  const { error } = await sb.from('invites').upsert({ email: email.trim().toLowerCase(), name: name.trim(), role });
+export async function invite(email, name, role = 'inspector', perms = null, projects = null) {
+  const row = { email: email.trim().toLowerCase(), name: name.trim(), role, projects: projects && projects.length ? projects : null };
+  if (perms) row.perms = perms;
+  const { error } = await sb.from('invites').upsert(row);
+  if (error) throw friendly(error);
+}
+/** Modifier les accès d'un membre (rôle, droits, projets autorisés) */
+export async function setAccess(id, { role, perms, projects }) {
+  const patch = {};
+  if (role) patch.role = role;
+  if (perms) patch.perms = perms;
+  if (projects !== undefined) patch.projects = projects && projects.length ? projects : null;
+  const { error } = await sb.from('profiles').update(patch).eq('id', id);
   if (error) throw friendly(error);
 }
 export async function removeInvite(email) {
@@ -207,3 +220,15 @@ export async function setActive(id, active) {
 }
 /** Noms des inspecteurs (cache local pour l'affichage hors ligne) */
 export async function names() { return await db.getMeta('profiles', {}); }
+
+// ---------- droits ----------
+export const PERMS = {
+  audit: 'Créer des audits',
+  details: 'Voir le détail de ses audits',
+  export: 'Exporter PDF / Excel',
+  actions: 'Gérer les actions',
+};
+/** Droit accordé ? (mode local ou admin : tout est permis) */
+export const can = p => !enabled || isAdmin() || profile?.perms?.[p] !== false;
+/** Projet accessible ? (null = tous les projets) */
+export const canProject = id => !enabled || isAdmin() || !Array.isArray(profile?.projects) || profile.projects.includes(id);

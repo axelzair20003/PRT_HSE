@@ -4,8 +4,8 @@
 // et pousser les changements — voir js/sync.js.
 
 const DB_NAME = 'prt-hse';
-const DB_VERSION = 1;
-export const STORES = ['subs', 'plans', 'inspections', 'actions', 'blobs', 'meta', 'outbox'];
+const DB_VERSION = 2; // v2 : ajout des projets
+export const STORES = ['projects', 'subs', 'plans', 'inspections', 'actions', 'blobs', 'meta', 'outbox'];
 
 let dbp = null;
 function open() {

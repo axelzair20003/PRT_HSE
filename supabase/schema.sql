@@ -6,7 +6,11 @@
 --   • seules les adresses invitées (table invites) peuvent créer un compte
 --   • un inspecteur ne voit que SES audits, actions et photos
 --   • l'admin (Ahmed) voit et modifie tout, gère les invitations,
---     les sous-traitants et les plans
+--     les projets, les entreprises et les plans
+--   • chaque invitation porte des droits (créer des audits, voir le détail,
+--     exporter, gérer les actions) et une liste de projets autorisés
+--
+-- Le script peut être relancé sans risque (mise à jour d'une base existante).
 -- =====================================================================
 
 -- ⚠️ AVANT d'exécuter : remplacer ADRESSE-EMAIL-AHMED@exemple.com tout en bas
@@ -19,6 +23,8 @@ create table if not exists public.invites (
   role       text not null default 'inspector' check (role in ('admin', 'inspector')),
   created_at timestamptz not null default now()
 );
+alter table public.invites add column if not exists perms jsonb not null default '{"audit": true, "details": true, "export": true, "actions": true}';
+alter table public.invites add column if not exists projects text[];   -- null = tous les projets
 
 create table if not exists public.profiles (
   id         uuid primary key references auth.users on delete cascade,
@@ -28,16 +34,21 @@ create table if not exists public.profiles (
   active     boolean not null default true,
   created_at timestamptz not null default now()
 );
+alter table public.profiles add column if not exists perms jsonb not null default '{"audit": true, "details": true, "export": true, "actions": true}';
+alter table public.profiles add column if not exists projects text[];
 
 -- Tous les enregistrements de l'app (même format que dans le téléphone)
 create table if not exists public.docs (
   id         text primary key,
-  kind       text not null check (kind in ('inspection', 'action', 'sub', 'plan')),
+  kind       text not null,
   owner      uuid not null default auth.uid() references auth.users on delete cascade,
   data       jsonb not null,
   updated_at timestamptz not null default now(),
   deleted    boolean not null default false
 );
+alter table public.docs add column if not exists project text;
+alter table public.docs drop constraint if exists docs_kind_check;
+alter table public.docs add constraint docs_kind_check check (kind in ('inspection', 'action', 'sub', 'plan', 'project'));
 create index if not exists docs_updated_idx on public.docs (updated_at);
 create index if not exists docs_owner_idx on public.docs (owner);
 
@@ -45,6 +56,13 @@ create index if not exists docs_owner_idx on public.docs (owner);
 create or replace function public.is_admin() returns boolean
 language sql stable security definer set search_path = public as $$
   select exists (select 1 from profiles where id = auth.uid() and role = 'admin' and active);
+$$;
+
+-- projet autorisé pour l'utilisateur connecté (liste vide/nulle = tous)
+create or replace function public.can_project(p text) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from profiles where id = auth.uid() and active
+    and (role = 'admin' or projects is null or cardinality(projects) = 0 or p is null or p = any(projects)));
 $$;
 
 create or replace function public.is_active() returns boolean
@@ -61,8 +79,8 @@ begin
   if not found then
     raise exception 'not invited';
   end if;
-  insert into profiles (id, email, name, role)
-  values (new.id, lower(new.email), coalesce(nullif(new.raw_user_meta_data ->> 'name', ''), inv.name), inv.role);
+  insert into profiles (id, email, name, role, perms, projects)
+  values (new.id, lower(new.email), coalesce(nullif(new.raw_user_meta_data ->> 'name', ''), inv.name), inv.role, inv.perms, inv.projects);
   return new;
 end;
 $$;
@@ -92,13 +110,13 @@ create policy "profiles: admin modifie" on public.profiles
 drop policy if exists "docs: lecture" on public.docs;
 create policy "docs: lecture" on public.docs
   for select using (
-    public.is_active() and (kind in ('sub', 'plan') or owner = auth.uid() or public.is_admin())
+    public.is_active() and (kind in ('sub', 'plan', 'project') or owner = auth.uid() or public.is_admin())
   );
 
 drop policy if exists "docs: création" on public.docs;
 create policy "docs: création" on public.docs
   for insert with check (
-    public.is_active() and ((kind in ('inspection', 'action') and owner = auth.uid()) or public.is_admin())
+    public.is_active() and ((kind in ('inspection', 'action') and owner = auth.uid() and public.can_project(project)) or public.is_admin())
   );
 
 drop policy if exists "docs: modification" on public.docs;
