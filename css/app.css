@@ -140,7 +140,7 @@ table.t td.r { text-align: right; white-space: nowrap; }
 @keyframes pulse { to { box-shadow: 0 0 0 10px rgba(26,86,168,.35); } }
 .pv-ctrl { position: absolute; right: 10px; bottom: 10px; display: flex; flex-direction: column; gap: 8px; z-index: 2; }
 .pv-ctrl button { width: 54px; height: 54px; border-radius: 12px; border: 2px solid var(--line); background: var(--surface); font-size: 24px; font-weight: 800; box-shadow: 0 2px 6px rgba(0,0,0,.25); }
-.plan-box { height: 55vh; border-radius: var(--r); border: 2px solid var(--line); }
+.plan-box { height: 42vh; border-radius: var(--r); border: 2px solid var(--line); }
 .plan-full { height: calc(100vh - var(--safe-t) - var(--safe-b) - 210px); }
 .map-bar { padding: 0 12px; }
 .plan-thumb { width: 86px; height: 64px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); background: #fff; }
@@ -160,3 +160,14 @@ table.t td.r { text-align: right; white-space: nowrap; }
 .scale-row { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
 .scale-row b { font-size: 22px; min-width: 30px; }
 svg text { fill: var(--ink); }
+
+/* grille de choix du sous-traitant (accueil) */
+.sub-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.sub-grid button {
+  min-height: 92px; padding: 12px; border-radius: var(--r); border: 0; text-align: left;
+  background: var(--c); color: #fff; display: flex; flex-direction: column; justify-content: center; gap: 4px;
+  box-shadow: 0 2px 6px rgba(0,0,0,.25);
+}
+.sub-grid button b { font-size: 20px; }
+.sub-grid button span { font-size: 12px; opacity: .9; line-height: 1.2; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.sub-grid button:active { transform: scale(.97); }

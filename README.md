@@ -46,19 +46,15 @@ Alternative Netlify : app.netlify.com → **Add new site → Deploy manually** �
 
 ⚠️ Les données sont stockées **dans l'app sur ce téléphone uniquement**. Faire régulièrement **Réglages → Sauvegarde complète (JSON)** et l'envoyer par mail / OneDrive. Ne pas supprimer l'icône de l'app (iOS effacerait les données).
 
-## 3. Importer le premier plan et les sous-traitants
-**Plan**
-1. Envoyer le plan SAM2 (PDF ou image) sur l'iPhone (mail, Teams, Fichiers…) et l'enregistrer dans **Fichiers**.
-2. App → **Accueil → Plans** (ou Réglages → Gérer les plans) → **Importer un plan** → choisir le fichier.
-3. Si le PDF a plusieurs pages, choisir la page. Vérifier le **Code** (ex. `SAM2`) : il sert à générer les références `PRT-SAM2-2026-001`.
-4. Ajouter d'autres plans (SAM3…) de la même façon.
+## 3. Plan et sous-traitants : déjà intégrés
+Au premier lancement, l'app charge automatiquement :
+- le plan **SAM 2A — vue aérienne** (`assets/plan-sam2a.jpg`, code `SAM2A` → références `PRT-SAM2A-2026-001`) ;
+- les 8 sous-traitants du fichier GSafe BOTG SAM2A : Betocor, Blocotelha, Borgel, Hommema, JDN/Besix, Reditec, TRBA, VKE ;
+- les 70 zones du fichier (« Roof DCH4 », « UTI 11 »…) en suggestions dans le champ Zone.
 
-**Sous-traitants**
-- Un par un : **Sous-trait. → ＋ Ajouter** → nom, société, responsable, téléphone, couleur, logo.
-- En masse : **Sous-trait. → Import rapide** → coller une ligne par sous-traitant :
-  `Nom ; Société ; Responsable ; Téléphone` (ou copier-coller 4 colonnes depuis Excel).
+**Démarrer une inspection = 1 tap** sur le sous-traitant depuis l'accueil. L'inspecteur (« Ahmed » par défaut, modifiable dans Réglages), la date, le site et le plan sont remplis tout seuls. Placer la zone sur le plan est facultatif (carte « 📍 Placer la zone » dans l'inspection).
 
-**Première inspection** : Accueil → **Nouvelle inspection** → sous-traitant → plan → tap sur la zone → **Démarrer**.
+Pour remplacer le plan : remplacer `assets/plan-sam2a.jpg` par une image du même nom, ou importer un autre plan via Réglages → Gérer les plans.
 
 ## Utilisation rapide
 - Thème → gros boutons 0–5 / N/A (re-taper une note l'efface). Une note ≤ 2 propose une action corrective.

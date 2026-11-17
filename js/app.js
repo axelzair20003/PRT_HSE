@@ -4,9 +4,10 @@ import { NA, SCALE, RATINGS, rating, themeScore, overallScore, criterionOfRef, t
 import * as db from './db.js';
 import { createPlanViewer } from './plan.js';
 import { compressImage, planFileToBlob, pdfPageCount } from './images.js';
+import { SEED_SUBS, SEED_LOCATIONS, SEED_PLAN, SEED_SITE } from './seed.js';
 import { buildXLSX, buildPDF, shareFile, download, canShareFile, actionRef } from './export.js';
 
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '1.1.0';
 
 // ---------- utilitaires ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -88,7 +89,7 @@ const badge = pct => { const r = rating(pct); return `<span class="badge" style=
 const ratingChip = pct => { const r = rating(pct); return `<span class="chip" style="background:${r.color};color:${r.fg}">${r.name}</span>`; };
 const subChip = s => s ? `<span class="chip" style="background:${esc(s.color || '#1A56A8')};color:#fff">${esc(s.name || 'Sans nom')}</span>` : '<span class="chip" style="background:#9E9E9E">—</span>';
 
-async function getSettings() { return await db.getMeta('settings', { inspector: '', site: 'SAM2', theme: 'auto' }); }
+async function getSettings() { return await db.getMeta('settings', { inspector: 'Ahmed', site: SEED_SITE, theme: 'auto' }); }
 async function saveSettings(s) { await db.setMeta('settings', s); }
 function applyTheme(t) {
   const dark = t === 'dark' || (t === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
@@ -145,30 +146,38 @@ async function addPhotos(fileList) {
 // =====================================================================
 
 async function vHome() {
-  setTop({ title: 'PRT HSE — Jan De Nul' });
-  const [{ subs, subList, planList }, insps, acts] = await Promise.all([maps(), db.all('inspections'), db.all('actions')]);
+  setTop({ title: 'PRT HSE — SAM 2A' });
+  const [{ subs, subList }, insps, acts] = await Promise.all([maps(), db.all('inspections'), db.all('actions')]);
   const recent = insps.sort((a, b) => (b.date + b.updatedAt).localeCompare(a.date + a.updatedAt)).slice(0, 8);
   const late = acts.filter(isLate).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
-  const open = acts.filter(a => a.status !== 'Closed');
-  const onboard = !planList.length || !subList.length;
   view.innerHTML = `
-    ${onboard ? `<div class="card" style="border-color:var(--brand-2)"><b>Premiers pas</b>
-      <ol style="margin:8px 0 0;padding-left:22px;line-height:1.9">
-        <li>${planList.length ? '✅' : ''} <a href="#/plans">Importer le plan du chantier (SAM2)</a></li>
-        <li>${subList.length ? '✅' : ''} <a href="#/subs">Ajouter les sous-traitants</a></li>
-        <li>Lancer une nouvelle inspection</li></ol></div>` : ''}
-    <a class="btn primary big" href="#/new">＋ Nouvelle inspection</a>
-    <div class="tiles">
-      <a class="tile" href="#/map"><b>◉</b>Plan & épingles</a>
-      <a class="tile" href="#/actions"><b>${open.length}</b>Actions ouvertes</a>
-      <a class="tile" href="#/subs"><b>${subList.filter(s => !s.archived).length}</b>Sous-traitants</a>
-      <a class="tile" href="#/plans"><b>${planList.length}</b>Plans</a>
-    </div>
+    <h2 style="margin-top:6px">Nouvelle inspection — choisissez le sous-traitant</h2>
+    ${subGrid(subList)}
     <h2 class="${late.length ? 'late' : ''}">Actions en retard (${late.length})</h2>
     ${late.slice(0, 6).map(a => actionCard(a, subs)).join('') || '<div class="empty">Aucune action en retard 👍</div>'}
     ${late.length > 6 ? `<a class="btn block" href="#/actions?late=1">Voir les ${late.length}</a>` : ''}
     <h2>Inspections récentes</h2>
     ${recent.map(i => inspCard(i, subs)).join('') || '<div class="empty">Aucune inspection pour l’instant.</div>'}`;
+  bindSubGrid();
+}
+
+function subGrid(subList) {
+  const active = subList.filter(s => !s.archived).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  return `<div class="sub-grid">${active.map(s => `<button type="button" data-start="${s.id}" style="--c:${esc(s.color)}">
+      <b>${esc(s.name)}</b><span>${esc(s.company || '')}</span></button>`).join('')}</div>`;
+}
+function bindSubGrid() {
+  view.querySelectorAll('[data-start]').forEach(b => b.onclick = () => startInspection(b.dataset.start));
+}
+async function startInspection(subId) {
+  const st = await getSettings();
+  const plans = await db.all('plans');
+  const last = await db.getMeta('lastPlan');
+  const plan = plans.find(p => p.id === last) || plans[0] || null;
+  const date = todayISO();
+  const ref = await nextRef(plan, date);
+  const insp = await db.put('inspections', { subId, planId: plan?.id || null, pin: null, zone: '', inspectors: st.inspector, date, site: st.site, ref, scores: {}, bonus: 0, penalty: 0 });
+  location.replace('#/insp/' + insp.id); // pas d'entrée d'historique : « retour » ne recrée pas d'inspection
 }
 
 function inspCard(i, subs) {
@@ -193,16 +202,13 @@ async function inspForm(state, { live }) {
   const subsActive = subList.filter(s => !s.archived || s.id === state.subId);
   if (!state.planId && planList.length) state.planId = planList[0].id;
   view.innerHTML = `
-    ${!subsActive.length || !planList.length ? `<div class="card" style="border-color:var(--danger)">Il faut au moins un <a href="#/subs">sous-traitant</a> et un <a href="#/plans">plan</a>.</div>` : ''}
-    <label class="f">1. Sous-traitant</label>
-    <div class="sub-pick">${subsActive.map(s => `<button type="button" data-sub="${s.id}" class="${s.id === state.subId ? 'on' : ''}">
-      ${s.logoId ? `<img class="logo" data-logo="${s.logoId}">` : `<span class="dot" style="background:${esc(s.color)};width:28px;height:28px"></span>`}
-      <span class="grow">${esc(s.name)}<div class="muted small">${esc(s.company || '')}</div></span></button>`).join('')}</div>
-    <label class="f">2. Plan</label>
-    <select class="in" id="f-plan">${planList.map(p => `<option value="${p.id}" ${p.id === state.planId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
-    <label class="f">3. Zone — tapez sur le plan pour poser l’épingle</label>
+    <label class="f" style="margin-top:4px">📍 Zone — tapez sur le plan pour poser l’épingle</label>
     <div id="pick" class="pv plan-box"></div>
-    <input class="in" id="f-zone" placeholder="Description de la zone (ex. Bât. A – N2 – façade nord)" value="${esc(state.zone || '')}" style="margin-top:8px">
+    <input class="in" id="f-zone" list="zones" placeholder="Zone (ex. Roof DCH4, UTI 11, FSA C…)" value="${esc(state.zone || '')}" style="margin-top:8px">
+    <datalist id="zones">${SEED_LOCATIONS.map(l => `<option value="${esc(l)}">`).join('')}</datalist>
+    <label class="f">Sous-traitant</label>
+    <select class="in" id="f-sub">${subsActive.map(s => `<option value="${s.id}" ${s.id === state.subId ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>
+    ${planList.length > 1 ? `<label class="f">Plan</label><select class="in" id="f-plan">${planList.map(p => `<option value="${p.id}" ${p.id === state.planId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
     <label class="f">Inspecteur(s)</label><input class="in" id="f-insp" value="${esc(state.inspectors || '')}" autocomplete="name">
     <div class="btns" style="margin:0"><div><label class="f">Date</label><input class="in" type="date" id="f-date" value="${esc(state.date)}"></div>
     <div><label class="f">Projet / Site</label><input class="in" id="f-site" value="${esc(state.site || '')}"></div></div>
@@ -226,37 +232,23 @@ async function inspForm(state, { live }) {
   };
   await mountPlan();
 
-  view.querySelector('.sub-pick').addEventListener('click', e => {
-    const b = e.target.closest('[data-sub]'); if (!b) return;
-    state.subId = b.dataset.sub;
-    view.querySelectorAll('[data-sub]').forEach(x => x.classList.toggle('on', x === b));
+  $('#f-sub').onchange = e => {
+    state.subId = e.target.value;
     if (state.pin) pv?.setPins([{ id: 'p', ...state.pin, color: subList.find(s => s.id === state.subId)?.color, ghost: true }]);
     live?.('sub');
-  });
-  $('#f-plan').onchange = e => { state.planId = e.target.value; state.pin = null; mountPlan(); live?.('plan'); };
+  };
+  if ($('#f-plan')) $('#f-plan').onchange = e => { state.planId = e.target.value; state.pin = null; mountPlan(); live?.('plan'); };
   const bind = (sel, key) => { $(sel).addEventListener('input', e => { state[key] = e.target.value; live?.(key); }); };
   bind('#f-zone', 'zone'); bind('#f-insp', 'inspectors'); bind('#f-date', 'date'); bind('#f-site', 'site');
   return { plans };
 }
 
 async function vNew(q) {
+  if (q.get('sub')) { await startInspection(q.get('sub')); return; }
   setTop({ title: 'Nouvelle inspection', back: '#/' });
-  const st = await getSettings();
-  const state = { subId: q.get('sub') || null, planId: null, pin: null, zone: '', inspectors: st.inspector, date: todayISO(), site: st.site };
-  const { plans } = await inspForm(state, { live: () => refresh() });
-  $('#form-foot').innerHTML = `<button class="btn primary big" id="go">Démarrer l’inspection</button><p class="muted small" id="miss"></p>`;
-  const refresh = () => {
-    const miss = [!state.subId && 'sous-traitant', !state.planId && 'plan', !state.pin && 'épingle sur le plan'].filter(Boolean);
-    $('#go').disabled = miss.length > 0;
-    $('#miss').textContent = miss.length ? 'À compléter : ' + miss.join(', ') : '';
-  };
-  refresh();
-  $('#go').onclick = async () => {
-    const ref = await nextRef(plans[state.planId], state.date);
-    const insp = await db.put('inspections', { ...state, ref, scores: {}, bonus: 0, penalty: 0 });
-    if (state.inspectors !== st.inspector) await saveSettings({ ...st, inspector: state.inspectors });
-    location.replace('#/insp/' + insp.id);
-  };
+  const { subList } = await maps();
+  view.innerHTML = `<h2 style="margin-top:6px">Choisissez le sous-traitant</h2>${subGrid(subList)}`;
+  bindSubGrid();
 }
 
 async function vInspEdit(id) {
@@ -286,6 +278,7 @@ async function vInsp(id) {
       <div class="card row"><div class="grow">${subChip(sub)}<div style="margin-top:6px;font-weight:700">${esc(plans[insp.planId]?.name || '')}${insp.zone ? ' — ' + esc(insp.zone) : ''}</div>
         <div class="muted small">${dateFR(insp.date)} · ${esc(insp.inspectors || '')}</div></div>
         <div style="text-align:center">${badge(o.pct)}<div class="small" style="margin-top:4px">${o.rating.name}</div></div></div>
+      ${!insp.pin ? `<a class="card link row" href="#/insp/${id}/edit" style="border-style:dashed"><span style="font-size:26px">📍</span><span class="grow"><b>Placer la zone sur le plan</b><div class="muted small">Facultatif — 1 tap sur le plan</div></span>›</a>` : ''}
       <div class="btns"><a class="btn primary" href="#/insp/${id}/sum">Résumé</a><button class="btn" id="exp">Exporter / Partager</button>
         <a class="btn" href="#/map?plan=${insp.planId}&insp=${id}">Voir sur le plan</a><a class="btn" href="#/actions?insp=${id}">Actions (${acts.length})</a></div>
       ${o.themes.map(t => {
@@ -532,7 +525,7 @@ async function vAction(id) {
     <div class="thumbs" id="a-thumbs"></div>
     <label class="f">Emplacement sur le plan ${a.planId ? '— ' + esc(plans[a.planId]?.name || '') : ''}</label>
     ${a.planId && plans[a.planId] ? `<div id="a-plan" class="pv plan-box" style="height:42vh"></div>
-      <button class="btn block" id="mv" style="margin-top:8px">Déplacer l’épingle</button>` : '<div class="muted">Aucun plan lié</div>'}
+      <button class="btn block" id="mv" style="margin-top:8px">${a.pin ? 'Déplacer l’épingle' : 'Placer l’épingle'}</button>` : '<div class="muted">Aucun plan lié</div>'}
     <button class="btn danger block" id="del" style="margin-top:20px">Supprimer l’action</button>
     <p class="muted small" style="text-align:center">Enregistrement automatique</p>`;
 
@@ -570,7 +563,7 @@ async function vAction(id) {
       onTap: (x, y) => { if (!moving) return; a.pin = { x, y }; moving = false; $('#mv').textContent = 'Déplacer l’épingle'; $('#mv').classList.remove('primary'); pv.setPins(pins()); save.flush(); toast('Épingle déplacée'); },
     });
     onCleanup(() => pv.destroy());
-    $('#mv').onclick = e => { moving = !moving; e.target.textContent = moving ? 'Tapez le nouvel emplacement…' : 'Déplacer l’épingle'; e.target.classList.toggle('primary', moving); pv.setPins(pins()); };
+    $('#mv').onclick = e => { moving = !moving; e.target.textContent = moving ? 'Tapez l’emplacement sur le plan…' : (a.pin ? 'Déplacer l’épingle' : 'Placer l’épingle'); e.target.classList.toggle('primary', moving); pv.setPins(pins()); };
   }
 }
 
@@ -895,10 +888,26 @@ window.addEventListener('hashchange', render);
 document.addEventListener('visibilitychange', () => { if (document.hidden) [...pendingSaves].forEach(d => d.flush()); });
 window.addEventListener('pagehide', () => [...pendingSaves].forEach(d => d.flush()));
 
+async function seed() {
+  if (await db.getMeta('seeded-sam2a')) return;
+  const existing = await db.all('subs', { includeDeleted: true });
+  for (const s of SEED_SUBS) {
+    if (!existing.some(e => (e.name || '').toLowerCase() === s.name.toLowerCase())) await db.put('subs', { ...s, contact: '', phone: '', archived: false });
+  }
+  const plans = await db.all('plans');
+  if (!plans.some(p => p.code === SEED_PLAN.code)) {
+    const blob = await (await fetch(SEED_PLAN.file)).blob();
+    const p = await db.put('plans', { name: SEED_PLAN.name, code: SEED_PLAN.code, blobId: await db.putBlob(blob) });
+    await db.setMeta('lastPlan', p.id);
+  }
+  await db.setMeta('seeded-sam2a', true);
+}
+
 (async function boot() {
   applyTheme((await getSettings()).theme);
   matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', async () => applyTheme((await getSettings()).theme));
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(e => console.warn('SW', e));
   navigator.storage?.persist?.().catch(() => {});
+  try { await seed(); } catch (e) { console.error('seed', e); }
   render();
 })();
