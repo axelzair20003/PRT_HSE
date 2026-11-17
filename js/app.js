@@ -4,10 +4,12 @@ import { NA, SCALE, RATINGS, rating, themeScore, overallScore, criterionOfRef, t
 import * as db from './db.js';
 import { createPlanViewer } from './plan.js';
 import { compressImage, planFileToBlob, pdfPageCount } from './images.js';
+import { ic } from './icons.js';
+import * as cloud from './cloud.js';
 import { SEED_SUBS, SEED_LOCATIONS, SEED_PLAN, SEED_SITE } from './seed.js';
 import { buildXLSX, buildPDF, shareFile, download, canShareFile, actionRef } from './export.js';
 
-export const APP_VERSION = '1.1.0';
+export const APP_VERSION = '2.0.0';
 
 // ---------- utilitaires ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -59,8 +61,8 @@ function ask(title, text, buttons) {
 }
 const confirmBox = (title, text, ok = 'Confirmer', cls = 'danger') => ask(title, text, [{ label: ok, value: true, cls }, { label: 'Annuler', value: false }]);
 
-function setTop({ title, back = null, actions = [] }) {
-  $('#title').textContent = title;
+function setTop({ title, sub = '', back = null, actions = [] }) {
+  $('#title').innerHTML = esc(title) + (sub ? `<small>${esc(sub)}</small>` : '');
   const b = $('#back');
   b.hidden = !back;
   b.onclick = () => { if (back === true) history.back(); else location.hash = back; };
@@ -69,12 +71,12 @@ function setTop({ title, back = null, actions = [] }) {
   for (const a of actions) {
     const btn = document.createElement('button');
     btn.className = 'icon-btn' + (a.txt ? ' txt' : '');
-    btn.textContent = a.label; btn.setAttribute('aria-label', a.aria || a.label);
+    btn.innerHTML = a.icon ? ic(a.icon, 24) : esc(a.label); btn.setAttribute('aria-label', a.aria || a.label || a.icon);
     btn.onclick = a.onClick;
     ta.appendChild(btn);
   }
 }
-const helpAction = { label: '?', aria: 'Barème', onClick: () => showScale() };
+const helpAction = { icon: 'help', aria: 'Barème', onClick: () => showScale() };
 function showScale() {
   openSheet(`<h3>Barème de notation</h3>
     ${SCALE.map(s => `<div class="scale-row"><b>${s.v}</b><div>${esc(s.fr)}<div class="muted small">${esc(s.en)}</div></div></div>`).join('')}
@@ -104,7 +106,8 @@ async function maps() {
 
 async function nextRef(plan, date) {
   const code = (plan?.code || plan?.name || 'SITE').toUpperCase().replace(/[^A-Z0-9]+/g, '').slice(0, 10) || 'SITE';
-  const prefix = `PRT-${code}-${(date || todayISO()).slice(0, 4)}-`;
+  const ini = cloud.enabled ? (cloud.myName() || 'X').split(/[\s.@_-]+/).filter(Boolean).map(w => w[0]).join('').toUpperCase().slice(0, 3) : '';
+  const prefix = `PRT-${code}-${(date || todayISO()).slice(0, 4)}-${ini}`;
   const all = await db.all('inspections', { includeDeleted: true });
   const max = all.filter(i => i.ref?.startsWith(prefix)).map(i => parseInt(i.ref.slice(prefix.length), 10) || 0).reduce((a, b) => Math.max(a, b), 0);
   return prefix + String(max + 1).padStart(3, '0');
@@ -120,6 +123,7 @@ async function createAction(insp, { critRef = '', observation = '', priority = '
   const sid = subId ?? insp?.subId;
   const sub = sid ? await db.get('subs', sid) : null;
   return db.put('actions', {
+    owner: insp?.owner || cloud.uid(),
     inspectionId: insp?.id || null, inspectionRef: insp?.ref || '', subId: sid || null, planId: planId ?? insp?.planId ?? null, pin: p,
     critRef, observation, priority, corrective: '', responsibility: sub?.contact || sub?.name || '',
     dueDate: todayISO(DUE_BY_PRIO[priority] ?? 7), status: 'Open', photos: [],
@@ -146,37 +150,51 @@ async function addPhotos(fileList) {
 // =====================================================================
 
 async function vHome() {
-  setTop({ title: 'PRT HSE — SAM 2A' });
+  setTop({ title: 'Inspections HSE', sub: 'SAM 2A', actions: [{ icon: 'gear', aria: 'Réglages', onClick: () => location.hash = '#/settings' }] });
   const [{ subs, subList }, insps, acts] = await Promise.all([maps(), db.all('inspections'), db.all('actions')]);
-  const recent = insps.sort((a, b) => (b.date + b.updatedAt).localeCompare(a.date + a.updatedAt)).slice(0, 8);
+  const recent = [...insps].sort((a, b) => (b.date + b.updatedAt).localeCompare(a.date + a.updatedAt)).slice(0, 6);
   const late = acts.filter(isLate).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+  const today = new Date().toLocaleDateString('fr-BE', { weekday: 'long', day: 'numeric', month: 'long' });
   view.innerHTML = `
-    <h2 style="margin-top:6px">Nouvelle inspection — choisissez le sous-traitant</h2>
-    ${subGrid(subList)}
-    <h2 class="${late.length ? 'late' : ''}">Actions en retard (${late.length})</h2>
-    ${late.slice(0, 6).map(a => actionCard(a, subs)).join('') || '<div class="empty">Aucune action en retard 👍</div>'}
-    ${late.length > 6 ? `<a class="btn block" href="#/actions?late=1">Voir les ${late.length}</a>` : ''}
-    <h2>Inspections récentes</h2>
-    ${recent.map(i => inspCard(i, subs)).join('') || '<div class="empty">Aucune inspection pour l’instant.</div>'}`;
+    ${cloud.enabled ? '<button class="sync-pill" id="sync-now" hidden></button>' : ''}
+    <div class="section-head"><span>Nouvelle inspection</span><span class="muted small" style="text-transform:capitalize">${esc(today)}</span></div>
+    ${subGrid(subList, insps, acts)}
+    ${late.length ? `<div class="section-head late"><span class="row" style="gap:6px">${ic('alert', 18)} Actions en retard</span><span>${late.length}</span></div>
+      ${late.slice(0, 5).map(a => actionCard(a, subs)).join('')}
+      ${late.length > 5 ? `<a class="btn block" href="#/actions?late=1">Voir les ${late.length} actions</a>` : ''}` : ''}
+    <div class="section-head"><span>${cloud.enabled && cloud.isAdmin() ? 'Audits de l’équipe' : cloud.enabled ? 'Mes audits' : 'Inspections récentes'}</span>${insps.length ? `<span class="muted small">${insps.length} au total</span>` : ''}</div>
+    ${recent.map(i => inspCard(i, subs)).join('') || '<div class="empty">Aucune inspection pour l’instant.<br>Touchez un sous-traitant pour commencer.</div>'}`;
   bindSubGrid();
+  drawSync();
+  $('#sync-now')?.addEventListener('click', () => cloud.sync());
 }
 
-function subGrid(subList) {
+function subGrid(subList, insps = [], acts = []) {
   const active = subList.filter(s => !s.archived).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-  return `<div class="sub-grid">${active.map(s => `<button type="button" data-start="${s.id}" style="--c:${esc(s.color)}">
-      <b>${esc(s.name)}</b><span>${esc(s.company || '')}</span></button>`).join('')}</div>`;
+  return `<div class="sub-grid">${active.map(s => {
+    const last = insps.filter(i => i.subId === s.id).sort((a, b) => b.date.localeCompare(a.date))[0];
+    const pct = last ? overallScore(last.scores, last.bonus, last.penalty).pct : null;
+    const open = acts.filter(a => a.subId === s.id && a.status !== 'Closed').length;
+    return `<button type="button" data-start="${s.id}" style="--c:${esc(s.color)}">
+      <b>${esc(s.name)}</b>
+      <span class="meta">${last ? `<i style="background:${rating(pct).color}"></i>${pct === null ? 'N/A' : Math.round(pct * 100) + ' %'}` : '&nbsp;'}${open ? ` · ${open} action${open > 1 ? 's' : ''}` : ''}</span>
+    </button>`;
+  }).join('')}</div>`;
 }
 function bindSubGrid() {
   view.querySelectorAll('[data-start]').forEach(b => b.onclick = () => startInspection(b.dataset.start));
 }
 async function startInspection(subId) {
+  // même sous-traitant déjà audité aujourd'hui → on reprend cet audit (pas de doublon)
+  const today = (await db.byIndex('inspections', 'subId', subId)).find(i => i.date === todayISO());
+  if (today) { location.hash = '#/insp/' + today.id; return; }
   const st = await getSettings();
   const plans = await db.all('plans');
   const last = await db.getMeta('lastPlan');
   const plan = plans.find(p => p.id === last) || plans[0] || null;
   const date = todayISO();
   const ref = await nextRef(plan, date);
-  const insp = await db.put('inspections', { subId, planId: plan?.id || null, pin: null, zone: '', inspectors: st.inspector, date, site: st.site, ref, scores: {}, bonus: 0, penalty: 0 });
+  const insp = await db.put('inspections', { owner: cloud.uid(), subId, planId: plan?.id || null, pin: null, zone: '', inspectors: cloud.enabled ? cloud.myName() : st.inspector, date, site: st.site, ref, scores: {}, bonus: 0, penalty: 0 });
   location.replace('#/insp/' + insp.id); // pas d'entrée d'historique : « retour » ne recrée pas d'inspection
 }
 
@@ -186,14 +204,23 @@ function inspCard(i, subs) {
   return `<a class="card link row" href="#/insp/${i.id}">
     <div class="grow"><div class="row wrap">${subChip(subs[i.subId])}<span class="muted small">${dateFR(i.date)}</span></div>
       <div style="font-weight:700;margin-top:4px">${esc(i.ref)}</div>
-      <div class="muted small ellip">${esc(i.zone || '')} · ${done}/124 critères</div></div>
+      <div class="muted small ellip">${cloud.enabled && cloud.isAdmin() && i.owner !== cloud.uid() ? `<b>${esc(i.inspectors || '')}</b> · ` : ''}${i.zone ? esc(i.zone) + ' · ' : ''}${done}/124 critères</div></div>
     ${badge(o.pct)}</a>`;
 }
+const daysTo = d => Math.round((new Date(d + 'T12:00:00') - new Date(todayISO() + 'T12:00:00')) / 864e5);
+function dueChip(a) {
+  if (a.status === 'Closed') return `<span class="due ok">${ic('check', 15)} Clôturée</span>`;
+  if (!a.dueDate) return '';
+  const n = daysTo(a.dueDate);
+  if (n < 0) return `<span class="due late">J+${-n}</span>`;
+  if (n === 0) return `<span class="due soon">Aujourd’hui</span>`;
+  return `<span class="due">J-${n}</span>`;
+}
 function actionCard(a, subs) {
-  return `<a class="card link prio-${a.priority}" href="#/action/${a.id}">
-    <div class="row wrap">${subChip(subs[a.subId])}<span class="chip" style="background:var(--surface-2)">${STATUS_FR[a.status] || a.status}</span><span class="small ${isLate(a) ? 'late' : 'muted'}">⏱ ${dateFR(a.dueDate)}</span></div>
-    <div style="font-weight:700;margin-top:6px">${esc(a.observation || '(observation à compléter)')}</div>
-    <div class="muted small ellip">${esc(actionRef(a))}${a.inspectionRef ? ' · ' + esc(a.inspectionRef) : ''}</div></a>`;
+  return `<a class="card link act-card prio-${a.priority}" href="#/action/${a.id}">
+    <div class="row">${subChip(subs[a.subId])}<span class="prio-txt">${a.priority}</span><span class="grow"></span>${dueChip(a)}</div>
+    <div class="act-title">${esc(a.observation || 'Observation à compléter')}</div>
+    <div class="muted small ellip">${esc(actionRef(a) || 'Action libre')}${a.status === 'In progress' ? ' · En cours' : ''}</div></a>`;
 }
 
 // ---------- formulaire inspection (création + modification) ----------
@@ -202,7 +229,7 @@ async function inspForm(state, { live }) {
   const subsActive = subList.filter(s => !s.archived || s.id === state.subId);
   if (!state.planId && planList.length) state.planId = planList[0].id;
   view.innerHTML = `
-    <label class="f" style="margin-top:4px">📍 Zone — tapez sur le plan pour poser l’épingle</label>
+    <label class="f" style="margin-top:4px">Zone — touchez le plan pour poser l’épingle</label>
     <div id="pick" class="pv plan-box"></div>
     <input class="in" id="f-zone" list="zones" placeholder="Zone (ex. Roof DCH4, UTI 11, FSA C…)" value="${esc(state.zone || '')}" style="margin-top:8px">
     <datalist id="zones">${SEED_LOCATIONS.map(l => `<option value="${esc(l)}">`).join('')}</datalist>
@@ -247,15 +274,25 @@ async function vNew(q) {
   if (q.get('sub')) { await startInspection(q.get('sub')); return; }
   setTop({ title: 'Nouvelle inspection', back: '#/' });
   const { subList } = await maps();
-  view.innerHTML = `<h2 style="margin-top:6px">Choisissez le sous-traitant</h2>${subGrid(subList)}`;
+  const [insps, acts] = await Promise.all([db.all('inspections'), db.all('actions')]);
+  view.innerHTML = `<div class="section-head"><span>Choisissez le sous-traitant</span></div>${subGrid(subList, insps, acts)}`;
   bindSubGrid();
 }
 
 async function vInspEdit(id) {
   const insp = await db.get('inspections', id);
-  setTop({ title: 'Infos inspection', back: '#/insp/' + id });
+  setTop({ title: 'Détails', back: '#/insp/' + id });
   const save = debounce(async () => { await db.put('inspections', insp); }, 300);
-  await inspForm(insp, { live: () => save() });
+  // les actions de l'audit encore sans emplacement reprennent la zone posée sur le plan
+  const pinActions = debounce(async () => {
+    const acts = (await db.byIndex('actions', 'inspectionId', id)).filter(a => !a.pin && insp.pin);
+    for (const [k, a] of acts.entries()) {
+      const ang = (k + 1) * 2.4;
+      await db.put('actions', { ...a, planId: insp.planId, pin: { x: clamp01(insp.pin.x + Math.cos(ang) * 0.03), y: clamp01(insp.pin.y + Math.sin(ang) * 0.03) } });
+    }
+  }, 300);
+  onCleanup(() => pinActions.flush());
+  await inspForm(insp, { live: k => { save(); if (k === 'pin') pinActions(); } });
   onCleanup(() => save.flush());
   $('#form-foot').innerHTML = `<p class="muted small">Référence : <b>${esc(insp.ref)}</b> · enregistrement automatique</p>
     <button class="btn danger block" id="del">Supprimer l’inspection</button>`;
@@ -270,26 +307,32 @@ async function vInsp(id) {
   if (!insp || insp.deleted) return vNotFound();
   const { subs, plans } = await maps();
   const sub = subs[insp.subId];
-  setTop({ title: insp.ref, back: '#/', actions: [helpAction, { label: '✎', aria: 'Modifier', onClick: () => location.hash = `#/insp/${id}/edit` }] });
+  setTop({ title: sub?.name || insp.ref, sub: insp.ref, back: '#/', actions: [{ icon: 'edit', aria: 'Modifier', onClick: () => location.hash = `#/insp/${id}/edit` }] });
   const acts = await db.byIndex('actions', 'inspectionId', id);
   const draw = () => {
     const o = overallScore(insp.scores, insp.bonus, insp.penalty);
     view.innerHTML = `
-      <div class="card row"><div class="grow">${subChip(sub)}<div style="margin-top:6px;font-weight:700">${esc(plans[insp.planId]?.name || '')}${insp.zone ? ' — ' + esc(insp.zone) : ''}</div>
-        <div class="muted small">${dateFR(insp.date)} · ${esc(insp.inspectors || '')}</div></div>
-        <div style="text-align:center">${badge(o.pct)}<div class="small" style="margin-top:4px">${o.rating.name}</div></div></div>
-      ${!insp.pin ? `<a class="card link row" href="#/insp/${id}/edit" style="border-style:dashed"><span style="font-size:26px">📍</span><span class="grow"><b>Placer la zone sur le plan</b><div class="muted small">Facultatif — 1 tap sur le plan</div></span>›</a>` : ''}
-      <div class="btns"><a class="btn primary" href="#/insp/${id}/sum">Résumé</a><button class="btn" id="exp">Exporter / Partager</button>
-        <a class="btn" href="#/map?plan=${insp.planId}&insp=${id}">Voir sur le plan</a><a class="btn" href="#/actions?insp=${id}">Actions (${acts.length})</a></div>
+      <div class="card score-card">
+        <div><div class="score-big" style="color:${o.pct === null ? 'var(--muted)' : o.rating.color}">${o.pct === null ? '—' : Math.round(o.pct * 100) + '<small>%</small>'}</div>
+          ${o.pct === null ? '<span class="muted small">Pas encore noté</span>' : ratingChip(o.pct)}</div>
+        <div class="score-meta"><b>${o.themes.reduce((a, t) => a + t.done, 0)} / 124</b><span>critères</span>
+          <span class="muted small">${dateFR(insp.date)} · ${esc(insp.inspectors || '')}</span>${insp.zone ? `<span class="muted small">${esc(insp.zone)}</span>` : ''}</div>
+      </div>
+      <div class="toolbar">
+        <a href="#/insp/${id}/sum">${ic('file')}<span>Résumé</span></a>
+        <button id="exp">${ic('share')}<span>Exporter</span></button>
+        <a href="${insp.pin ? `#/map?plan=${insp.planId}&insp=${id}` : `#/insp/${id}/edit`}">${ic('pin')}<span>${insp.pin ? 'Plan' : 'Localiser'}</span></a>
+        <a href="#/actions?insp=${id}">${ic('list')}<span>Actions${acts.length ? ` (${acts.length})` : ''}</span></a>
+      </div>
       ${o.themes.map(t => {
         const allNA = t.na === t.total;
         return `<div class="card theme-card">
           <a class="grow row" href="#/insp/${id}/t/${t.theme.ref}" style="color:inherit;text-decoration:none">
             <span class="num">${t.theme.ref.replace('.0', '')}</span>
-            <span class="grow"><b>${esc(t.theme.name)}</b><div class="muted small">${t.done}/${t.total} critères${t.na ? ` · ${t.na} N/A` : ''}</div>
+            <span class="grow"><b>${esc(t.theme.name)}</b><div class="muted small">${t.done} / ${t.total}${t.na ? ` · ${t.na} N/A` : ''}</div>
             <div class="progress"><i style="width:${t.done / t.total * 100}%"></i></div></span>
-            ${badge(t.pct)}</a>
-          <button class="btn" style="min-width:64px;padding:0 8px;font-size:14px" data-na="${t.theme.ref}">${allNA ? 'Annuler N/A' : 'N/A'}</button></div>`;
+            ${t.done ? badge(t.pct) : '<span class="badge none">—</span>'}</a>
+          <button class="na-btn ${allNA ? 'on' : ''}" data-na="${t.theme.ref}" aria-label="Thème non applicable">N/A</button></div>`;
       }).join('')}`;
     $('#exp').onclick = () => exportSheet([insp]);
   };
@@ -312,7 +355,7 @@ async function vTheme(id, ref) {
   const th = THEMES.find(t => t.ref === ref);
   const idx = THEMES.indexOf(th);
   insp.scores ||= {};
-  setTop({ title: `${th.ref.replace('.0', '')}. ${th.name}`, back: '#/insp/' + id, actions: [helpAction] });
+  setTop({ title: th.name, sub: `Thème ${idx + 1} / ${THEMES.length}`, back: '#/insp/' + id, actions: [helpAction] });
   const acts = await db.byIndex('actions', 'inspectionId', id);
   const save = debounce(() => db.put('inspections', insp), 350);
   onCleanup(() => save.flush());
@@ -328,8 +371,8 @@ async function vTheme(id, ref) {
         <div class="scores">${[0, 1, 2, 3, 4, 5, NA].map(v => `<button type="button" data-v="${v}" class="${v === NA ? 'na' : ''} ${s.v === v ? 'on' : ''}">${v === NA ? 'N/A' : v}</button>`).join('')}</div>
         <textarea class="in" style="margin-top:8px;min-height:60px" placeholder="Evidence / Comments" data-c>${esc(s.c || '')}</textarea>
         <div class="crit-tools">
-          <label class="btn" style="margin:0">📷 Photo<input type="file" accept="image/*" capture="environment" class="hidden-input" data-photo-in multiple></label>
-          <button class="btn" data-act>＋ Action${n ? ` (${n})` : ''}</button></div>
+          <label class="btn" style="margin:0">${ic('camera')} Photo<input type="file" accept="image/*" capture="environment" class="hidden-input" data-photo-in multiple></label>
+          <button class="btn" data-act>${ic('plus')} Action${n ? ` (${n})` : ''}</button></div>
         <div class="thumbs" data-thumbs></div></div>`;
     }).join('')}
     <div class="btns">
@@ -356,6 +399,11 @@ async function vTheme(id, ref) {
       card.querySelectorAll('[data-v]').forEach(b => b.classList.toggle('on', b === vb && s.v !== null));
       navigator.vibrate?.(15);
       save.flush(); drawScore();
+      // passage automatique au critère suivant
+      if (s.v !== null && !(typeof s.v === 'number' && s.v <= 2)) {
+        const next = card.nextElementSibling;
+        if (next?.classList.contains('crit')) setTimeout(() => next.scrollIntoView({ behavior: 'smooth', block: 'center' }), 180);
+      }
       if (typeof s.v === 'number' && s.v <= 2) {
         const existing = (await db.byIndex('actions', 'inspectionId', id)).filter(a => a.critRef === cref);
         if (!existing.length) {
@@ -394,7 +442,7 @@ async function vSummary(id) {
   const insp = await db.get('inspections', id);
   if (!insp) return vNotFound();
   const { subs } = await maps();
-  setTop({ title: 'Executive Summary', back: '#/insp/' + id, actions: [helpAction] });
+  setTop({ title: 'Résumé', sub: insp.ref, back: '#/insp/' + id, actions: [helpAction] });
   const save = debounce(() => db.put('inspections', insp), 300);
   onCleanup(() => save.flush());
   view.innerHTML = `
@@ -408,7 +456,7 @@ async function vSummary(id) {
       <div><label class="f">LSR Penalty Points</label><input class="in" type="number" inputmode="decimal" step="0.5" data-k="penalty" value="${Number(insp.penalty) || 0}"></div></div>
     </div>
     <div id="sum-out"></div>
-    <button class="btn primary block" id="exp" style="margin-top:12px">Exporter / Partager</button>`;
+    <button class="btn primary block" id="exp" style="margin-top:12px">${ic('share')} Exporter</button>`;
   const draw = () => {
     const o = overallScore(insp.scores, insp.bonus, insp.penalty);
     $('#sum-out').innerHTML = `
@@ -469,32 +517,34 @@ function readySheet(file) {
 }
 
 // ---------- actions ----------
-const actionFilters = { sub: '', prio: '', status: 'notclosed', late: false, insp: '' };
+const actionFilters = { sub: '', view: 'todo', insp: '' };
 async function vActions(q) {
-  setTop({ title: 'Action Report', back: q.get('insp') ? '#/insp/' + q.get('insp') : null });
-  if (q.has('late')) actionFilters.late = true;
+  setTop({ title: 'Actions', back: q.get('insp') ? '#/insp/' + q.get('insp') : null });
+  if (q.has('late')) actionFilters.view = 'late';
   actionFilters.insp = q.get('insp') || '';
   const { subs, subList } = await maps();
   const all = await db.all('actions');
+  const views = { todo: a => a.status !== 'Closed', late: isLate, done: a => a.status === 'Closed' };
+  const count = k => all.filter(a => views[k](a) && (!actionFilters.sub || a.subId === actionFilters.sub) && (!actionFilters.insp || a.inspectionId === actionFilters.insp)).length;
   const draw = () => {
     const f = actionFilters;
-    const list = all.filter(a => (!f.sub || a.subId === f.sub) && (!f.prio || a.priority === f.prio) &&
-      (!f.status || (f.status === 'notclosed' ? a.status !== 'Closed' : a.status === f.status)) && (!f.late || isLate(a)) && (!f.insp || a.inspectionId === f.insp))
-      .sort((a, b) => (isLate(b) - isLate(a)) || PRIOS.indexOf(a.priority) - PRIOS.indexOf(b.priority) || (a.dueDate || '').localeCompare(b.dueDate || ''));
-    $('#alist').innerHTML = `<div class="muted small" style="margin:4px">${list.length} action(s)</div>` + (list.map(a => actionCard(a, subs)).join('') || '<div class="empty">Aucune action</div>');
+    const list = all.filter(a => views[f.view](a) && (!f.sub || a.subId === f.sub) && (!f.insp || a.inspectionId === f.insp))
+      .sort((a, b) => (a.dueDate || '9').localeCompare(b.dueDate || '9') || PRIOS.indexOf(a.priority) - PRIOS.indexOf(b.priority));
+    view.querySelectorAll('[data-view]').forEach(b => { b.classList.toggle('on', b.dataset.view === f.view); b.querySelector('em').textContent = count(b.dataset.view); });
+    $('#alist').innerHTML = list.map(a => actionCard(a, subs)).join('') || '<div class="empty">Rien à afficher</div>';
   };
   view.innerHTML = `
-    <div class="filters">
-      <select class="in" data-f="sub"><option value="">Tous sous-traitants</option>${subList.map(s => `<option value="${s.id}" ${actionFilters.sub === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>
-      <select class="in" data-f="prio"><option value="">Toutes priorités</option>${PRIOS.map(p => `<option value="${p}" ${actionFilters.prio === p ? 'selected' : ''}>${p}</option>`).join('')}</select>
-      <select class="in" data-f="status"><option value="">Tous statuts</option><option value="notclosed" ${actionFilters.status === 'notclosed' ? 'selected' : ''}>Non clôturées</option>${STATUSES.map(s => `<option value="${s}" ${actionFilters.status === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
-      <button class="btn ${actionFilters.late ? 'primary' : ''}" id="late" style="min-height:48px">⏱ En retard</button>
+    <div class="tabs3">
+      <button data-view="todo">À faire <em></em></button>
+      <button data-view="late">En retard <em></em></button>
+      <button data-view="done">Clôturées <em></em></button>
     </div>
-    ${actionFilters.insp ? `<div class="card small">Filtré sur une inspection · <a href="#/actions">tout afficher</a></div>` : ''}
+    <select class="in" id="f-sub" style="margin-bottom:12px"><option value="">Tous les sous-traitants</option>${subList.filter(s => !s.archived).sort((a, b) => a.name.localeCompare(b.name)).map(s => `<option value="${s.id}" ${actionFilters.sub === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>
+    ${actionFilters.insp ? `<div class="card small row">Actions d’une inspection<span class="grow"></span><a href="#/actions">Tout afficher</a></div>` : ''}
     <div id="alist"></div>`;
   draw();
-  view.addEventListener('change', e => { const k = e.target.dataset.f; if (k) { actionFilters[k] = e.target.value; draw(); } });
-  $('#late').onclick = e => { actionFilters.late = !actionFilters.late; e.target.classList.toggle('primary', actionFilters.late); draw(); };
+  view.querySelector('.tabs3').onclick = e => { const b = e.target.closest('[data-view]'); if (b) { actionFilters.view = b.dataset.view; draw(); } };
+  $('#f-sub').onchange = e => { actionFilters.sub = e.target.value; draw(); };
 }
 
 async function vAction(id) {
@@ -502,7 +552,7 @@ async function vAction(id) {
   if (!a || a.deleted) return vNotFound();
   const { subs, subList, plans } = await maps();
   const insp = a.inspectionId ? await db.get('inspections', a.inspectionId) : null;
-  setTop({ title: 'Action corrective', back: true });
+  setTop({ title: 'Action', sub: a.critRef ? actionRef(a) : '', back: true });
   const save = debounce(() => db.put('actions', a), 300);
   onCleanup(() => save.flush());
   const crit = a.critRef ? criterionOfRef(a.critRef) : null;
@@ -521,7 +571,7 @@ async function vAction(id) {
     <label class="f">Due Date</label><input class="in" type="date" data-k="dueDate" value="${esc(a.dueDate || '')}">
     <label class="f">Progress</label><div class="seg" data-seg="status">${STATUSES.map(s => `<button type="button" data-val="${s}" class="${a.status === s ? 'on' : ''}">${s}</button>`).join('')}</div>
     <label class="f">Photos</label>
-    <label class="btn block">📷 Ajouter une photo<input type="file" accept="image/*" capture="environment" class="hidden-input" id="a-photo" multiple></label>
+    <label class="btn block">${ic('camera')} Ajouter une photo<input type="file" accept="image/*" capture="environment" class="hidden-input" id="a-photo" multiple></label>
     <div class="thumbs" id="a-thumbs"></div>
     <label class="f">Emplacement sur le plan ${a.planId ? '— ' + esc(plans[a.planId]?.name || '') : ''}</label>
     ${a.planId && plans[a.planId] ? `<div id="a-plan" class="pv plan-box" style="height:42vh"></div>
@@ -568,53 +618,46 @@ async function vAction(id) {
 }
 
 // ---------- carte / plan ----------
-const mapFilters = { sub: '', theme: '', prio: '', status: '', type: '' };
+let mapSub = '';
 async function vMap(q) {
-  view.classList.add('full');
+  view.classList.add('full', 'map-page');
   const { subs, subList, plans, planList } = await maps();
-  setTop({ title: 'Plan du chantier', actions: [{ label: 'Plans', txt: true, onClick: () => location.hash = '#/plans' }] });
-  if (!planList.length) { view.classList.remove('full'); view.innerHTML = `<div class="empty">Aucun plan.<br><br><a class="btn primary" href="#/plans">Importer un plan</a></div>`; return; }
-  const planId = q.get('plan') && plans[q.get('plan')] ? q.get('plan') : (await db.getMeta('lastPlan')) && plans[await db.getMeta('lastPlan')] ? await db.getMeta('lastPlan') : planList[0].id;
+  setTop({ title: 'Plan', sub: plans[await db.getMeta('lastPlan')]?.name || '' });
+  if (!planList.length) { view.classList.remove('full', 'map-page'); view.innerHTML = `<div class="empty">Aucun plan.<br><br><a class="btn primary" href="#/plans">Importer un plan</a></div>`; return; }
+  const planId = q.get('plan') && plans[q.get('plan')] ? q.get('plan') : (plans[await db.getMeta('lastPlan')] ? await db.getMeta('lastPlan') : planList[0].id);
   await db.setMeta('lastPlan', planId);
   const onlyInsp = q.get('insp');
   const [insps, acts] = await Promise.all([db.all('inspections'), db.all('actions')]);
-  const sel = (k, opts, all) => `<select class="in" data-mf="${k}"><option value="">${all}</option>${opts.map(([v, l]) => `<option value="${esc(v)}" ${mapFilters[k] === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
-  view.innerHTML = `<div class="map-bar">
-    ${planList.length > 1 ? `<select class="in" id="m-plan" style="margin-bottom:8px">${planList.map(p => `<option value="${p.id}" ${p.id === planId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
-    <div class="filters" style="grid-template-columns:1fr 1fr 1fr">
-      ${sel('sub', subList.map(s => [s.id, s.name]), 'Sous-trait.')}
-      ${sel('type', [['insp', 'Inspections'], ['action', 'Actions']], 'Tout type')}
-      ${sel('theme', THEMES.map(t => [t.ref, `${t.ref} ${t.name}`]), 'Thème')}
-      ${sel('prio', PRIOS.map(p => [p, p]), 'Priorité')}
-      ${sel('status', STATUSES.map(s => [s, s]), 'Statut')}
-      <button class="btn" id="m-reset" style="min-height:48px;font-size:14px">Réinit.</button>
+  const active = subList.filter(s => !s.archived).sort((a, b) => a.name.localeCompare(b.name));
+  view.innerHTML = `
+    <div class="chips-bar">
+      <button data-ms="" class="${!mapSub ? 'on' : ''}">Tous</button>
+      ${active.map(s => `<button data-ms="${s.id}" class="${mapSub === s.id ? 'on' : ''}" style="--c:${esc(s.color)}"><i></i>${esc(s.name)}</button>`).join('')}
     </div>
-    ${onlyInsp ? `<div class="small" style="margin-bottom:6px">Filtré sur une inspection · <a href="#/map?plan=${planId}">tout</a></div>` : ''}
-    <div class="muted small" style="margin-bottom:6px">Tap sur une épingle = détail · tap sur le plan = nouvelle observation</div></div>
-    <div id="map" class="pv plan-full"></div>`;
-
+    ${planList.length > 1 ? `<select class="in" id="m-plan" style="margin:0 12px 8px;width:calc(100% - 24px)">${planList.map(p => `<option value="${p.id}" ${p.id === planId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
+    <div id="map" class="pv map-fill"></div>
+    <div class="map-legend"><span><b class="lg-i">I</b> Inspection</span><span><b class="lg-a">!</b> Action ouverte</span></div>`;
   const computePins = () => {
-    const f = mapFilters, out = [];
-    if (f.type !== 'action' && !f.theme && !f.prio && !f.status)
-      insps.filter(i => i.planId === planId && i.pin && (!f.sub || i.subId === f.sub) && (!onlyInsp || i.id === onlyInsp))
-        .forEach(i => out.push({ id: 'i:' + i.id, ...i.pin, color: subs[i.subId]?.color, label: 'I' }));
-    if (f.type !== 'insp')
-      acts.filter(a => a.planId === planId && a.pin && (!f.sub || a.subId === f.sub) && (!f.prio || a.priority === f.prio) && (!f.status || a.status === f.status) &&
-        (!f.theme || (a.critRef && themeOfRef(a.critRef)?.ref === f.theme)) && (!onlyInsp || a.inspectionId === onlyInsp))
-        .forEach(a => out.push({ id: 'a:' + a.id, ...a.pin, color: subs[a.subId]?.color, label: a.priority === 'High' ? '!!' : '!', kind: 'action' }));
+    const out = [];
+    insps.filter(i => i.planId === planId && i.pin && (!mapSub || i.subId === mapSub) && (!onlyInsp || i.id === onlyInsp))
+      .forEach(i => out.push({ id: 'i:' + i.id, ...i.pin, color: subs[i.subId]?.color, label: 'I' }));
+    acts.filter(a => a.planId === planId && a.pin && a.status !== 'Closed' && (!mapSub || a.subId === mapSub) && (!onlyInsp || a.inspectionId === onlyInsp))
+      .forEach(a => out.push({ id: 'a:' + a.id, ...a.pin, color: subs[a.subId]?.color, label: '!', kind: 'action' }));
     return out;
   };
   const pv = createPlanViewer($('#map'), {
-    imageURL: await db.blobURL(plans[planId].blobId), pins: computePins(),
+    imageURL: await db.blobURL(plans[planId].blobId), pins: computePins(), cover: true,
     onPinTap: p => pinSheet(p.id, { subs, insps, acts }),
     onTap: (x, y) => newObservationHere(planId, { x, y }, subList),
   });
   onCleanup(() => pv.destroy());
-  view.addEventListener('change', e => {
-    if (e.target.id === 'm-plan') { location.hash = '#/map?plan=' + e.target.value; return; }
-    const k = e.target.dataset.mf; if (k) { mapFilters[k] = e.target.value; pv.setPins(computePins()); }
-  });
-  $('#m-reset').onclick = () => { Object.keys(mapFilters).forEach(k => mapFilters[k] = ''); view.querySelectorAll('[data-mf]').forEach(s => s.value = ''); pv.setPins(computePins()); };
+  view.querySelector('.chips-bar').onclick = e => {
+    const b = e.target.closest('[data-ms]'); if (!b) return;
+    mapSub = b.dataset.ms;
+    view.querySelectorAll('[data-ms]').forEach(x => x.classList.toggle('on', x === b));
+    pv.setPins(computePins());
+  };
+  $('#m-plan')?.addEventListener('change', e => { location.hash = '#/map?plan=' + e.target.value; });
 }
 function pinSheet(pid, { subs, insps, acts }) {
   const [kind, id] = pid.split(':');
@@ -632,7 +675,7 @@ function pinSheet(pid, { subs, insps, acts }) {
 function newObservationHere(planId, pin, subList) {
   const active = subList.filter(s => !s.archived);
   if (!active.length) { toast('Ajoutez d’abord un sous-traitant'); return; }
-  openSheet(`<h3>Nouvelle observation ici</h3><p class="muted">Choisissez le sous-traitant concerné :</p>
+  openSheet(`<h3>Nouvelle action à cet endroit</h3><p class="muted">Choisissez le sous-traitant concerné :</p>
     <div class="sub-pick">${active.map(s => `<button data-s="${s.id}"><span class="dot" style="background:${esc(s.color)};width:26px;height:26px"></span>${esc(s.name)}</button>`).join('')}</div>
     <button class="btn block" data-close style="margin-top:10px">Annuler</button>`,
     (el, close) => el.addEventListener('click', async e => {
@@ -646,47 +689,47 @@ function newObservationHere(planId, pin, subList) {
 // ---------- sous-traitants ----------
 let showArchived = false;
 async function vSubs() {
-  setTop({ title: 'Sous-traitants', actions: [{ label: '＋', aria: 'Ajouter', onClick: newSub }] });
+  setTop({ title: 'Sous-traitants', actions: cloud.isAdmin() ? [{ icon: 'plus', aria: 'Ajouter', onClick: newSub }] : [] });
   const [subs, insps, acts] = await Promise.all([db.all('subs'), db.all('inspections'), db.all('actions')]);
-  const list = subs.filter(s => showArchived || !s.archived).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  const rows = subs.filter(s => showArchived || !s.archived).map(s => {
+    const last = insps.filter(i => i.subId === s.id).sort((a, b) => b.date.localeCompare(a.date))[0];
+    return { s, pct: last ? overallScore(last.scores, last.bonus, last.penalty).pct : null, open: acts.filter(a => a.subId === s.id && a.status !== 'Closed').length, late: acts.filter(a => a.subId === s.id && isLate(a)).length };
+  }).sort((a, b) => (b.pct ?? -1) - (a.pct ?? -1) || a.s.name.localeCompare(b.s.name));
+  let rank = 0;
   view.innerHTML = `
-    <div class="btns"><button class="btn primary" id="add">＋ Ajouter</button><button class="btn" id="bulk">Import rapide</button></div>
-    ${list.map(s => {
-      const last = insps.filter(i => i.subId === s.id).sort((a, b) => b.date.localeCompare(a.date))[0];
-      const open = acts.filter(a => a.subId === s.id && a.status !== 'Closed').length;
-      return `<a class="card link row" href="#/sub/${s.id}" style="${s.archived ? 'opacity:.55' : ''}">
-        ${s.logoId ? `<img class="logo" data-logo="${s.logoId}">` : `<span class="dot" style="background:${esc(s.color)};width:32px;height:32px"></span>`}
-        <div class="grow"><b>${esc(s.name || 'Sans nom')}</b>${s.archived ? ' <span class="chip" style="background:#9E9E9E">archivé</span>' : ''}
-          <div class="muted small ellip">${esc(s.company || '')}${s.contact ? ' · ' + esc(s.contact) : ''}</div>
-          <div class="small">${open} action(s) ouverte(s)</div></div>
-        ${last ? badge(overallScore(last.scores, last.bonus, last.penalty).pct) : ''}</a>`;
-    }).join('') || '<div class="empty">Aucun sous-traitant</div>'}
-    <label class="row" style="margin:14px 4px;gap:10px"><input type="checkbox" id="arch" ${showArchived ? 'checked' : ''} style="width:26px;height:26px"> Afficher les archivés</label>`;
-  view.querySelectorAll('[data-logo]').forEach(async im => { im.src = await db.blobURL(im.dataset.logo); });
-  $('#add').onclick = newSub;
+    <div class="section-head"><span>Classement — dernier audit</span></div>
+    ${rows.map(({ s, pct, open, late }) => `<a class="card link row sub-row" href="#/sub/${s.id}" style="--c:${esc(s.color)};${s.archived ? 'opacity:.5' : ''}">
+        <span class="rank">${pct === null ? '–' : ++rank}</span>
+        <div class="grow"><b>${esc(s.name || 'Sans nom')}</b>
+          <div class="small ${late ? 'late' : 'muted'}">${open ? `${open} action${open > 1 ? 's' : ''} ouverte${open > 1 ? 's' : ''}${late ? ` · ${late} en retard` : ''}` : (pct === null ? 'Pas encore audité' : 'Aucune action ouverte')}</div></div>
+        ${pct === null ? '' : badge(pct)}</a>`).join('') || '<div class="empty">Aucun sous-traitant</div>'}
+    <div class="row" style="justify-content:space-between;margin:14px 4px">
+      <label class="row small" style="gap:8px"><input type="checkbox" id="arch" ${showArchived ? 'checked' : ''} style="width:22px;height:22px"> Archivés</label>
+      ${cloud.isAdmin() ? '<button class="link-btn" id="bulk">Import rapide</button>' : ''}</div>`;
   $('#arch').onchange = e => { showArchived = e.target.checked; render(); };
-  $('#bulk').onclick = () => openSheet(`<h3>Import rapide</h3>
-    <p class="muted small">Un sous-traitant par ligne :<br><code>Nom ; Société ; Responsable ; Téléphone</code><br>Vous pouvez coller depuis Excel (colonnes séparées par tabulation).</p>
-    <textarea class="in" id="bulk-t" style="min-height:180px" placeholder="Alphascaff ; Alphascaff SA ; Sébastien ; +32 ..."></textarea>
+  $('#bulk') && ($('#bulk').onclick = () => openSheet(`<h3>Import rapide</h3>
+    <p class="muted small">Un nom de sous-traitant par ligne (copier-coller depuis Excel possible).</p>
+    <textarea class="in" id="bulk-t" style="min-height:180px" placeholder="Alphascaff&#10;Unitec"></textarea>
     <div class="btns"><button class="btn" data-close>Annuler</button><button class="btn primary" id="bulk-go">Importer</button></div>`,
     (el, close) => el.querySelector('#bulk-go').onclick = async () => {
       const existing = await db.all('subs', { includeDeleted: true });
       const lines = el.querySelector('#bulk-t').value.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
       let n = 0;
       for (const l of lines) {
-        const [name, company = '', contact = '', phone = ''] = l.split(/\t|;/).map(x => x.trim());
-        if (!name) continue;
-        await db.put('subs', { name, company, contact, phone, color: PALETTE[(existing.length + n) % PALETTE.length], archived: false }); n++;
+        const [name, contact = '', phone = ''] = l.split(/\t|;/).map(x => x.trim());
+        if (!name || existing.some(e => (e.name || '').toLowerCase() === name.toLowerCase())) continue;
+        await db.put('subs', { name, contact, phone, color: PALETTE[(existing.length + n) % PALETTE.length], archived: false }); n++;
       }
-      close(); toast(`${n} sous-traitant(s) importé(s)`); render();
-    });
+      close(); toast(`${n} sous-traitant(s) ajouté(s)`); render();
+    }));
 }
 async function newSub() {
   const n = (await db.all('subs', { includeDeleted: true })).length;
-  const s = await db.put('subs', { name: '', company: '', contact: '', phone: '', color: PALETTE[n % PALETTE.length], archived: false });
+  const s = await db.put('subs', { name: '', contact: '', phone: '', color: PALETTE[n % PALETTE.length], archived: false });
   location.hash = `#/sub/${s.id}/edit`;
 }
 async function vSubEdit(id) {
+  if (!cloud.isAdmin()) return vNotFound();
   const s = await db.get('subs', id);
   if (!s) return vNotFound();
   setTop({ title: s.name || 'Nouveau sous-traitant', back: true });
@@ -694,7 +737,6 @@ async function vSubEdit(id) {
   onCleanup(() => save.flush());
   view.innerHTML = `
     <label class="f">Nom *</label><input class="in" data-k="name" value="${esc(s.name)}" placeholder="ex. Alphascaff">
-    <label class="f">Société</label><input class="in" data-k="company" value="${esc(s.company)}">
     <label class="f">Responsable</label><input class="in" data-k="contact" value="${esc(s.contact)}">
     <label class="f">Téléphone</label><input class="in" type="tel" data-k="phone" value="${esc(s.phone)}">
     <label class="f">Couleur des épingles</label>
@@ -703,7 +745,7 @@ async function vSubEdit(id) {
     <label class="f">Logo (facultatif)</label>
     <div class="row"><img class="logo" id="logo" style="width:64px;height:64px;${s.logoId ? '' : 'display:none'}">
       <label class="btn grow">Choisir une image<input type="file" accept="image/*" class="hidden-input" id="logo-in"></label>
-      ${s.logoId ? '<button class="btn danger" id="logo-del">✕</button>' : ''}</div>
+      ${s.logoId ? `<button class="btn danger" id="logo-del" aria-label="Retirer">${ic('x')}</button>` : ''}</div>
     <button class="btn block ${s.archived ? 'primary' : ''}" id="arch" style="margin-top:20px">${s.archived ? 'Désarchiver' : 'Archiver'}</button>
     <p class="muted small" style="text-align:center">Enregistrement automatique</p>`;
   if (s.logoId) $('#logo').src = await db.blobURL(s.logoId);
@@ -720,7 +762,7 @@ async function vSubEdit(id) {
 async function vSub(id) {
   const s = await db.get('subs', id);
   if (!s) return vNotFound();
-  setTop({ title: s.name || 'Sous-traitant', back: '#/subs', actions: [{ label: '✎', aria: 'Modifier', onClick: () => location.hash = `#/sub/${id}/edit` }] });
+  setTop({ title: s.name || 'Sous-traitant', back: '#/subs', actions: cloud.isAdmin() ? [{ icon: 'edit', aria: 'Modifier', onClick: () => location.hash = `#/sub/${id}/edit` }] : [] });
   const [insps, acts] = await Promise.all([db.byIndex('inspections', 'subId', id), db.byIndex('actions', 'subId', id)]);
   insps.sort((a, b) => a.date.localeCompare(b.date));
   const pts = insps.map(i => ({ i, pct: overallScore(i.scores, i.bonus, i.penalty).pct }));
@@ -728,14 +770,14 @@ async function vSub(id) {
   const { subs } = await maps();
   view.innerHTML = `
     <div class="card row">${s.logoId ? `<img class="logo" id="lg" style="width:60px;height:60px">` : `<span class="dot" style="background:${esc(s.color)};width:40px;height:40px"></span>`}
-      <div class="grow"><b style="font-size:20px">${esc(s.name)}</b><div class="muted">${esc(s.company || '')}</div>
+      <div class="grow"><b style="font-size:20px">${esc(s.name)}</b>
       <div>${esc(s.contact || '')}${s.phone ? ` · <a href="tel:${esc(s.phone.replace(/\s/g, ''))}">${esc(s.phone)}</a>` : ''}</div></div></div>
-    <div class="btns"><a class="btn primary" href="#/new?sub=${id}">＋ Inspection</a><a class="btn" href="#/actions" id="go-acts">Actions (${open.length})</a></div>
+    <div class="btns"><a class="btn primary" href="#/new?sub=${id}">${ic('plus')} Inspection</a><a class="btn" href="#/actions" id="go-acts">Actions (${open.length})</a></div>
     <h2>Évolution du score</h2>${lineChart(pts)}
     <h2>Actions ouvertes (${open.length})</h2>${open.map(a => actionCard(a, subs)).join('') || '<div class="empty">Aucune</div>'}
     <h2>Inspections (${insps.length})</h2>${[...insps].reverse().map(i => inspCard(i, subs)).join('') || '<div class="empty">Aucune</div>'}`;
   if (s.logoId) $('#lg').src = await db.blobURL(s.logoId);
-  $('#go-acts').onclick = () => { actionFilters.sub = id; actionFilters.status = 'notclosed'; actionFilters.late = false; };
+  $('#go-acts').onclick = () => { actionFilters.sub = id; actionFilters.view = 'todo'; };
 }
 function lineChart(pts) {
   const v = pts.filter(p => p.pct !== null);
@@ -753,7 +795,8 @@ function lineChart(pts) {
 
 // ---------- plans ----------
 async function vPlans() {
-  setTop({ title: 'Plans du chantier', back: true });
+  if (!cloud.isAdmin()) return vNotFound();
+  setTop({ title: 'Plans', back: true });
   const plans = await db.all('plans');
   view.innerHTML = `
     <label class="btn primary big">⬆ Importer un plan (image ou PDF)<input type="file" accept="image/*,application/pdf,.pdf" class="hidden-input" id="p-in"></label>
@@ -761,7 +804,7 @@ async function vPlans() {
     ${plans.map(p => `<div class="card" data-p="${p.id}"><div class="row"><img class="plan-thumb" data-img="${p.blobId}">
       <div class="grow"><label class="f" style="margin-top:0">Nom</label><input class="in" data-k="name" value="${esc(p.name)}"></div></div>
       <div class="btns" style="margin-bottom:0"><div><label class="f">Code (référence)</label><input class="in" data-k="code" value="${esc(p.code || '')}" placeholder="SAM2"></div>
-      <div style="display:flex;align-items:end;gap:6px"><a class="btn grow" href="#/map?plan=${p.id}">Ouvrir</a><button class="btn danger" data-del>✕</button></div></div></div>`).join('') || '<div class="empty">Aucun plan importé</div>'}`;
+      <div style="display:flex;align-items:end;gap:6px"><a class="btn grow" href="#/map?plan=${p.id}">Ouvrir</a><button class="btn danger" data-del aria-label="Supprimer">${ic('x')}</button></div></div></div>`).join('') || '<div class="empty">Aucun plan importé</div>'}`;
   view.querySelectorAll('[data-img]').forEach(async im => { im.src = await db.blobURL(im.dataset.img); });
   const saves = {};
   view.addEventListener('input', e => {
@@ -791,33 +834,46 @@ async function vPlans() {
       const base = f.name.replace(/\.[^.]+$/, '');
       const code = (base.match(/SAM\s*\d+/i)?.[0] || '').replace(/\s/g, '').toUpperCase() || base.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
       await db.put('plans', { name: base, code, blobId });
-      toast('Plan importé ✔'); render();
+      toast('Plan importé'); render();
     } catch (err) { console.error(err); toast('Import impossible : ' + err.message, 4000); }
   };
 }
 
 // ---------- réglages ----------
 async function vSettings() {
-  setTop({ title: 'Réglages' });
+  setTop({ title: 'Réglages', back: '#/' });
   const st = await getSettings();
   let est = '';
   try { const e = await navigator.storage?.estimate?.(); if (e) est = `${(e.usage / 1048576).toFixed(1)} Mo utilisés`; } catch { /* ignore */ }
   const persisted = await navigator.storage?.persisted?.().catch(() => false);
   view.innerHTML = `
+    ${cloud.enabled ? `<div class="card row member">
+      <span class="avatar">${esc((cloud.myName() || '?').split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase())}</span>
+      <div class="grow"><b>${esc(cloud.myName())}</b> ${cloud.isAdmin() ? '<span class="chip role">Admin</span>' : '<span class="chip role insp">Inspecteur</span>'}
+        <div class="muted small ellip">${esc(cloud.profile?.email || '')}</div></div></div>
+    <button class="sync-pill" id="sync-now" hidden></button>
+    ${cloud.isAdmin() ? `<a class="btn block primary" href="#/team" style="margin:10px 0">${ic('building')} Équipe et invitations</a>` : ''}` : ''}
     <div class="card">
-      <label class="f" style="margin-top:0">Inspecteur par défaut</label><input class="in" data-s="inspector" value="${esc(st.inspector)}">
+      ${cloud.enabled ? '' : `<label class="f" style="margin-top:0">Inspecteur par défaut</label><input class="in" data-s="inspector" value="${esc(st.inspector)}">`}
       <label class="f">Projet / Site par défaut</label><input class="in" data-s="site" value="${esc(st.site)}">
       <label class="f">Affichage</label><div class="seg" id="theme">${[['auto', 'Auto'], ['light', 'Clair'], ['dark', 'Sombre']].map(([v, l]) => `<button data-val="${v}" class="${st.theme === v ? 'on' : ''}">${l}</button>`).join('')}</div>
     </div>
-    <a class="btn block" href="#/plans" style="margin-bottom:10px">Gérer les plans</a>
+    ${cloud.isAdmin() ? '<a class="btn block" href="#/plans" style="margin-bottom:10px">Gérer les plans</a>' : ''}
     <button class="btn block" id="scale" style="margin-bottom:10px">Barème de notation (Notes)</button>
     <h2>Exports</h2>
     <button class="btn block primary" id="x-all" style="margin-bottom:10px">Excel — toutes les inspections</button>
     <h2>Sauvegarde</h2>
-    <button class="btn block" id="bk" style="margin-bottom:10px">💾 Sauvegarde complète (JSON)</button>
-    <label class="btn block danger">♻ Restaurer une sauvegarde<input type="file" accept="application/json,.json" class="hidden-input" id="rs"></label>
-    <p class="muted small" style="margin-top:14px">Données stockées uniquement sur cet appareil${est ? ' · ' + est : ''} · stockage ${persisted ? 'persistant ✔' : 'non garanti — faites des sauvegardes régulières'}.<br>
-    Version ${APP_VERSION} · 100 % hors ligne.</p>`;
+    <button class="btn block" id="bk" style="margin-bottom:10px">${ic('download')} Sauvegarde complète (JSON)</button>
+    ${cloud.enabled ? '' : `<label class="btn block danger">${ic('upload')} Restaurer une sauvegarde<input type="file" accept="application/json,.json" class="hidden-input" id="rs"></label>`}
+    ${cloud.enabled ? `<button class="btn block danger" id="logout" style="margin-top:20px">Se déconnecter</button>` : ''}
+    <p class="muted small" style="margin-top:14px">${cloud.enabled ? 'Données envoyées automatiquement au serveur HSE' : 'Données stockées uniquement sur cet appareil'}${est ? ' · ' + est : ''}${cloud.enabled ? '' : ` · stockage ${persisted ? 'persistant' : 'non garanti — faites des sauvegardes régulières'}`}.<br>
+    Version ${APP_VERSION} · fonctionne hors ligne.</p>`;
+  drawSync();
+  $('#sync-now')?.addEventListener('click', () => cloud.sync());
+  $('#logout')?.addEventListener('click', async () => {
+    if (!await confirmBox('Se déconnecter ?', 'Les données de ce téléphone seront effacées après envoi au serveur.', 'Se déconnecter')) return;
+    try { await cloud.signOut(); location.hash = '#/'; location.reload(); } catch (e) { toast(e.message, 5000); }
+  });
   const save = debounce(() => saveSettings(st), 300);
   onCleanup(() => save.flush());
   view.addEventListener('input', e => { const k = e.target.dataset.s; if (k) { st[k] = e.target.value; save(); } });
@@ -830,12 +886,67 @@ async function vSettings() {
     await db.setMeta('lastBackup', new Date().toISOString());
     readySheet(new File([JSON.stringify(json)], `PRT-HSE-sauvegarde-${todayISO()}.json`, { type: 'application/json' }));
   };
-  $('#rs').onchange = async e => {
+  if ($('#rs')) $('#rs').onchange = async e => {
     const f = e.target.files[0]; if (!f) return;
     if (!await confirmBox('Restaurer cette sauvegarde ?', 'Toutes les données actuelles de l’app seront <b>remplacées</b>.', 'Remplacer mes données')) return;
-    try { await db.importAll(JSON.parse(await f.text())); toast('Restauration terminée ✔'); location.hash = '#/'; render(); }
+    try { await db.importAll(JSON.parse(await f.text())); toast('Restauration terminée'); location.hash = '#/'; render(); }
     catch (err) { toast('Échec : ' + err.message, 4000); }
   };
+}
+
+// ---------- équipe (admin) ----------
+async function vTeam() {
+  setTop({ title: 'Équipe', sub: 'Accès à l’application', back: '#/settings' });
+  if (!cloud.isAdmin()) return vNotFound();
+  view.innerHTML = '<div class="empty">Chargement…</div>';
+  let t;
+  try { t = await cloud.team(); } catch (e) { view.innerHTML = `<div class="empty">${esc(e.message)}<br>Une connexion internet est nécessaire.</div>`; return; }
+  const insps = await db.all('inspections');
+  const pending = t.invites.filter(i => !t.profiles.some(p => p.email === i.email));
+  view.innerHTML = `
+    <div class="card">
+      <b>Inviter une personne</b>
+      <p class="muted small" style="margin:4px 0 8px">Elle pourra ensuite créer son compte dans l’app avec cette adresse.</p>
+      <input class="in" id="t-name" placeholder="Nom et prénom" autocomplete="off">
+      <input class="in" id="t-mail" type="email" inputmode="email" placeholder="Email" style="margin-top:8px" autocomplete="off">
+      <div class="seg" id="t-role" style="margin-top:8px"><button data-val="inspector" class="on">Inspecteur</button><button data-val="admin">Administrateur</button></div>
+      <button class="btn primary block" id="t-go" style="margin-top:10px">${ic('plus')} Inviter</button>
+    </div>
+    <div class="section-head"><span>Membres</span><span class="muted small">${t.profiles.length}</span></div>
+    ${t.profiles.map(p => {
+      const n = insps.filter(i => i.owner === p.id).length;
+      const last = insps.filter(i => i.owner === p.id).sort((a, b) => b.date.localeCompare(a.date))[0];
+      return `<div class="card row member ${p.active ? '' : 'off'}">
+        <span class="avatar">${esc((p.name || p.email).split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase())}</span>
+        <div class="grow"><b>${esc(p.name || p.email)}</b>${p.role === 'admin' ? ' <span class="chip role">Admin</span>' : ''}
+          <div class="muted small ellip">${esc(p.email)}</div>
+          <div class="small">${n} audit${n > 1 ? 's' : ''}${last ? ` · dernier ${dateFR(last.date)}` : ''}${p.active ? '' : ' · <b class="late">bloqué</b>'}</div></div>
+        ${p.id !== cloud.uid() ? `<button class="btn small-btn" data-act="${p.id}" data-on="${p.active ? 0 : 1}">${p.active ? 'Bloquer' : 'Réactiver'}</button>` : ''}
+      </div>`;
+    }).join('')}
+    ${pending.length ? `<div class="section-head"><span>Invitations en attente</span><span class="muted small">${pending.length}</span></div>
+      ${pending.map(i => `<div class="card row member"><span class="avatar pending">${ic('clock', 18)}</span>
+        <div class="grow"><b>${esc(i.name || i.email)}</b>${i.role === 'admin' ? ' <span class="chip role">Admin</span>' : ''}<div class="muted small ellip">${esc(i.email)} · pas encore inscrit</div></div>
+        <button class="btn small-btn danger" data-del="${esc(i.email)}" aria-label="Annuler">${ic('x', 18)}</button></div>`).join('')}` : ''}`;
+  let role = 'inspector';
+  $('#t-role').onclick = e => { const b = e.target.closest('[data-val]'); if (!b) return; role = b.dataset.val; $('#t-role').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); };
+  $('#t-go').onclick = async () => {
+    const mail = $('#t-mail').value.trim(), name = $('#t-name').value.trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(mail)) return toast('Adresse email invalide');
+    try { await cloud.invite(mail, name, role); toast('Invitation enregistrée'); render(); } catch (e) { toast(e.message, 4000); }
+  };
+  view.addEventListener('click', async e => {
+    const a = e.target.closest('[data-act]');
+    if (a) {
+      const on = a.dataset.on === '1';
+      if (!on && !await confirmBox('Bloquer cet accès ?', 'La personne ne pourra plus envoyer ni consulter de données. Ses audits restent visibles pour vous.', 'Bloquer')) return;
+      try { await cloud.setActive(a.dataset.act, on); render(); } catch (err) { toast(err.message, 4000); }
+    }
+    const d = e.target.closest('[data-del]');
+    if (d && await confirmBox('Annuler cette invitation ?', esc(d.dataset.del), 'Annuler l’invitation')) {
+      try { await cloud.removeInvite(d.dataset.del); render(); } catch (err) { toast(err.message, 4000); }
+    }
+  });
 }
 
 function vNotFound() { setTop({ title: 'Introuvable', back: '#/' }); view.innerHTML = '<div class="empty">Élément introuvable ou supprimé.</div>'; }
@@ -856,8 +967,9 @@ const routes = [
   [/^\/subs$/, vSubs, 'subs'],
   [/^\/sub\/([^/]+)$/, vSub, 'subs'],
   [/^\/sub\/([^/]+)\/edit$/, vSubEdit, 'subs'],
-  [/^\/plans$/, vPlans, 'settings'],
-  [/^\/settings$/, vSettings, 'settings'],
+  [/^\/plans$/, vPlans, 'home'],
+  [/^\/settings$/, vSettings, 'home'],
+  [/^\/team$/, vTeam, 'home'],
 ];
 
 let renderSeq = 0;
@@ -888,19 +1000,48 @@ window.addEventListener('hashchange', render);
 document.addEventListener('visibilitychange', () => { if (document.hidden) [...pendingSaves].forEach(d => d.flush()); });
 window.addEventListener('pagehide', () => [...pendingSaves].forEach(d => d.flush()));
 
+const seedId = name => 'sub-' + name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+const SEED_PLAN_ID = 'plan-sam2a', SEED_PLAN_BLOB = 'blob-plan-sam2a';
+
+/** Anciennes installations : les sous-traitants / le plan de départ reçoivent leur identifiant fixe */
+async function migrateSeedIds() {
+  if (await db.getMeta('ids-v3')) return;
+  const remap = {};
+  for (const s of await db.all('subs', { includeDeleted: true })) {
+    const seedSub = SEED_SUBS.find(x => x.name.toLowerCase() === (s.name || '').toLowerCase());
+    if (!seedSub || s.id === seedId(seedSub.name)) continue;
+    remap[s.id] = seedId(seedSub.name);
+    await db.putRaw('subs', { ...s, id: remap[s.id] }); await db.purge('subs', s.id);
+  }
+  for (const p of await db.all('plans', { includeDeleted: true })) {
+    if (p.code !== SEED_PLAN.code || p.id === SEED_PLAN_ID) continue;
+    remap[p.id] = SEED_PLAN_ID;
+    await db.putRaw('plans', { ...p, id: SEED_PLAN_ID }); await db.purge('plans', p.id);
+    if (await db.getMeta('lastPlan') === p.id) await db.setMeta('lastPlan', SEED_PLAN_ID);
+  }
+  if (Object.keys(remap).length) {
+    for (const store of ['inspections', 'actions']) for (const r of await db.all(store, { includeDeleted: true })) {
+      if (remap[r.subId] || remap[r.planId]) await db.putRaw(store, { ...r, subId: remap[r.subId] || r.subId, planId: remap[r.planId] || r.planId });
+    }
+  }
+  await db.setMeta('ids-v3', true);
+}
+
 async function seed() {
-  if (await db.getMeta('seeded-sam2a')) return;
+  await migrateSeedIds();
+  if (await db.getMeta('seeded-v3')) return;
   const existing = await db.all('subs', { includeDeleted: true });
   for (const s of SEED_SUBS) {
-    if (!existing.some(e => (e.name || '').toLowerCase() === s.name.toLowerCase())) await db.put('subs', { ...s, contact: '', phone: '', archived: false });
+    if (!existing.some(e => (e.name || '').toLowerCase() === s.name.toLowerCase())) await db.put('subs', { ...s, id: seedId(s.name), contact: '', phone: '', archived: false });
   }
   const plans = await db.all('plans');
   if (!plans.some(p => p.code === SEED_PLAN.code)) {
     const blob = await (await fetch(SEED_PLAN.file)).blob();
-    const p = await db.put('plans', { name: SEED_PLAN.name, code: SEED_PLAN.code, blobId: await db.putBlob(blob) });
-    await db.setMeta('lastPlan', p.id);
+    await db.putBlob(blob, SEED_PLAN_BLOB);
+    await db.put('plans', { id: SEED_PLAN_ID, name: SEED_PLAN.name, code: SEED_PLAN.code, blobId: SEED_PLAN_BLOB });
+    await db.setMeta('lastPlan', SEED_PLAN_ID);
   }
-  await db.setMeta('seeded-sam2a', true);
+  await db.setMeta('seeded-v3', true);
 }
 
 (async function boot() {
@@ -908,6 +1049,69 @@ async function seed() {
   matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', async () => applyTheme((await getSettings()).theme));
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(e => console.warn('SW', e));
   navigator.storage?.persist?.().catch(() => {});
-  try { await seed(); } catch (e) { console.error('seed', e); }
-  render();
+  try { await cloud.init(); } catch (e) { console.error('cloud', e); }
+  if (cloud.enabled && !cloud.session) return showLogin();
+  await startApp();
 })();
+
+async function startApp() {
+  document.body.classList.remove('login-mode');
+  // sous-traitants et plan de départ avec identifiants fixes, identiques sur tous les téléphones
+  // (seul l'admin les envoie au serveur, voir cloud.push)
+  try { await seed(); } catch (e) { console.error('seed', e); }
+  cloud.onStatus(drawSync);
+  cloud.syncSoon(0);
+  render();
+}
+
+// ---------- écran de connexion ----------
+function showLogin() {
+  document.body.classList.add('login-mode');
+  let mode = 'in';
+  const label = () => mode === 'up' ? 'Créer mon compte' : 'Se connecter';
+  const draw = () => {
+    view.innerHTML = `
+      <div class="login">
+        <div class="login-logo"><img src="icons/icon-192.png" alt=""></div>
+        <h1>PRT HSE</h1>
+        <p class="muted">SAM 2A · Site HSE Performance Rating</p>
+        <div class="tabs3 two"><button type="button" data-m="in" class="${mode === 'in' ? 'on' : ''}">Se connecter</button><button type="button" data-m="up" class="${mode === 'up' ? 'on' : ''}">Créer mon compte</button></div>
+        <form id="lf" autocomplete="on">
+          ${mode === 'up' ? '<label class="f">Nom et prénom</label><input class="in" id="l-name" autocomplete="name" required>' : ''}
+          <label class="f">Email professionnel</label><input class="in" id="l-mail" type="email" inputmode="email" autocomplete="username" required>
+          <label class="f">Mot de passe</label><input class="in" id="l-pass" type="password" autocomplete="${mode === 'up' ? 'new-password' : 'current-password'}" minlength="8" required>
+          <p class="login-err" id="l-err"></p>
+          <button class="btn primary big" id="l-go">${label()}</button>
+        </form>
+        <p class="muted small login-foot">${mode === 'up' ? 'Réservé aux adresses invitées par l’administrateur HSE.' : 'Accès sur invitation · une seule connexion par téléphone.'}</p>
+      </div>`;
+    view.querySelector('.tabs3').onclick = e => { const b = e.target.closest('[data-m]'); if (b) { mode = b.dataset.m; draw(); } };
+    $('#lf').onsubmit = async e => {
+      e.preventDefault();
+      const btn = $('#l-go'); btn.disabled = true; btn.textContent = 'Connexion…'; $('#l-err').textContent = '';
+      try {
+        if (mode === 'up') await cloud.signUp($('#l-mail').value, $('#l-pass').value, $('#l-name').value);
+        else await cloud.signIn($('#l-mail').value, $('#l-pass').value);
+        history.replaceState(null, '', '#/'); await startApp();
+      } catch (err) { $('#l-err').textContent = err.message; btn.disabled = false; btn.textContent = label(); }
+    };
+  };
+  setTop({ title: '' });
+  draw();
+}
+
+// ---------- indicateur de synchronisation ----------
+function syncLabel(st) {
+  if (!cloud.enabled) return null;
+  if (st.state === 'offline') return { cls: 'off', txt: st.pending ? `Hors ligne · ${st.pending} en attente` : 'Hors ligne' };
+  if (st.state === 'syncing') return { cls: 'run', txt: 'Synchronisation…' };
+  if (st.state === 'error') return { cls: 'err', txt: st.pending ? `${st.pending} en attente · réessayer` : 'Erreur · réessayer' };
+  if (st.pending) return { cls: 'run', txt: `${st.pending} en attente d’envoi` };
+  return { cls: 'ok', txt: 'Synchronisé' };
+}
+function drawSync(st = cloud.status) {
+  document.querySelectorAll('.sync-pill').forEach(el => {
+    const l = syncLabel(st); if (!l) { el.hidden = true; return; }
+    el.hidden = false; el.className = 'sync-pill ' + l.cls; el.innerHTML = `<i></i>${esc(l.txt)}`;
+  });
+}

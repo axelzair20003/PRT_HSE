@@ -1,0 +1,143 @@
+-- =====================================================================
+-- PRT HSE — base de données Supabase
+-- À coller dans Supabase → SQL Editor → New query → Run (une seule fois)
+--
+-- Règles :
+--   • seules les adresses invitées (table invites) peuvent créer un compte
+--   • un inspecteur ne voit que SES audits, actions et photos
+--   • l'admin (Ahmed) voit et modifie tout, gère les invitations,
+--     les sous-traitants et les plans
+-- =====================================================================
+
+-- ⚠️ AVANT d'exécuter : remplacer ADRESSE-EMAIL-AHMED@exemple.com tout en bas
+--    par l'adresse email d'Ahmed (c'est lui qui sera administrateur)
+
+-- ---------- Tables ----------
+create table if not exists public.invites (
+  email      text primary key check (email = lower(email)),
+  name       text,
+  role       text not null default 'inspector' check (role in ('admin', 'inspector')),
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.profiles (
+  id         uuid primary key references auth.users on delete cascade,
+  email      text not null,
+  name       text,
+  role       text not null default 'inspector' check (role in ('admin', 'inspector')),
+  active     boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+-- Tous les enregistrements de l'app (même format que dans le téléphone)
+create table if not exists public.docs (
+  id         text primary key,
+  kind       text not null check (kind in ('inspection', 'action', 'sub', 'plan')),
+  owner      uuid not null default auth.uid() references auth.users on delete cascade,
+  data       jsonb not null,
+  updated_at timestamptz not null default now(),
+  deleted    boolean not null default false
+);
+create index if not exists docs_updated_idx on public.docs (updated_at);
+create index if not exists docs_owner_idx on public.docs (owner);
+
+-- ---------- Fonctions de rôle ----------
+create or replace function public.is_admin() returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from profiles where id = auth.uid() and role = 'admin' and active);
+$$;
+
+create or replace function public.is_active() returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from profiles where id = auth.uid() and active);
+$$;
+
+-- ---------- Inscription réservée aux invités ----------
+create or replace function public.handle_new_user() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare inv invites;
+begin
+  select * into inv from invites where email = lower(new.email);
+  if not found then
+    raise exception 'not invited';
+  end if;
+  insert into profiles (id, email, name, role)
+  values (new.id, lower(new.email), coalesce(nullif(new.raw_user_meta_data ->> 'name', ''), inv.name), inv.role);
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function public.handle_new_user();
+
+-- ---------- Sécurité (Row Level Security) ----------
+alter table public.invites  enable row level security;
+alter table public.profiles enable row level security;
+alter table public.docs     enable row level security;
+
+drop policy if exists "invites: admin" on public.invites;
+create policy "invites: admin" on public.invites
+  for all using (public.is_admin()) with check (public.is_admin());
+
+drop policy if exists "profiles: lecture" on public.profiles;
+create policy "profiles: lecture" on public.profiles
+  for select using (id = auth.uid() or public.is_admin());
+
+drop policy if exists "profiles: admin modifie" on public.profiles;
+create policy "profiles: admin modifie" on public.profiles
+  for update using (public.is_admin()) with check (public.is_admin());
+
+drop policy if exists "docs: lecture" on public.docs;
+create policy "docs: lecture" on public.docs
+  for select using (
+    public.is_active() and (kind in ('sub', 'plan') or owner = auth.uid() or public.is_admin())
+  );
+
+drop policy if exists "docs: création" on public.docs;
+create policy "docs: création" on public.docs
+  for insert with check (
+    public.is_active() and ((kind in ('inspection', 'action') and owner = auth.uid()) or public.is_admin())
+  );
+
+drop policy if exists "docs: modification" on public.docs;
+create policy "docs: modification" on public.docs
+  for update
+  using (public.is_active() and ((kind in ('inspection', 'action') and owner = auth.uid()) or public.is_admin()))
+  with check (public.is_active() and ((kind in ('inspection', 'action') and owner = auth.uid()) or public.is_admin()));
+-- pas de suppression physique : l'app marque deleted = true
+
+-- ---------- Stockage des fichiers ----------
+-- photos : dossier par utilisateur ;  shared : plans et logos (lisibles par tous les comptes actifs)
+insert into storage.buckets (id, name, public) values ('photos', 'photos', false), ('shared', 'shared', false)
+on conflict (id) do nothing;
+
+drop policy if exists "photos: lecture" on storage.objects;
+create policy "photos: lecture" on storage.objects for select
+  using (bucket_id = 'photos' and (public.is_admin() or (storage.foldername(name))[1] = auth.uid()::text));
+
+drop policy if exists "photos: envoi" on storage.objects;
+create policy "photos: envoi" on storage.objects for insert
+  with check (bucket_id = 'photos' and public.is_active() and ((storage.foldername(name))[1] = auth.uid()::text or public.is_admin()));
+
+drop policy if exists "photos: remplacement" on storage.objects;
+create policy "photos: remplacement" on storage.objects for update
+  using (bucket_id = 'photos' and ((storage.foldername(name))[1] = auth.uid()::text or public.is_admin()));
+
+drop policy if exists "shared: lecture" on storage.objects;
+create policy "shared: lecture" on storage.objects for select
+  using (bucket_id = 'shared' and public.is_active());
+
+drop policy if exists "shared: admin envoi" on storage.objects;
+create policy "shared: admin envoi" on storage.objects for insert
+  with check (bucket_id = 'shared' and public.is_admin());
+
+drop policy if exists "shared: admin remplacement" on storage.objects;
+create policy "shared: admin remplacement" on storage.objects for update
+  using (bucket_id = 'shared' and public.is_admin());
+
+-- ---------- Premier administrateur ----------
+insert into public.invites (email, name, role)
+values (lower('ADRESSE-EMAIL-AHMED@exemple.com'), 'Ahmed', 'admin')   -- ⚠️ à remplacer
+on conflict (email) do update set role = 'admin';

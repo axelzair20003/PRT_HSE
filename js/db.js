@@ -60,7 +60,35 @@ export async function put(store, obj) {
     t.objectStore(store).put(obj);
     if (store !== 'meta') t.objectStore('outbox').add({ store, recordId: obj.id, op: 'put', at: obj.updatedAt });
   });
+  writeListeners.forEach(f => f(store, obj));
   return obj;
+}
+const writeListeners = new Set();
+/** Appelé après chaque écriture locale (utilisé pour déclencher la synchro) */
+export const onWrite = f => writeListeners.add(f);
+
+/** Écriture venant du serveur : pas d'horodatage ni d'outbox */
+export async function putRaw(store, obj) {
+  await tx([store], 'readwrite', t => t.objectStore(store).put(obj));
+  return obj;
+}
+/** Suppression physique locale (migration d'identifiants) */
+export async function purge(store, id) { return tx([store], 'readwrite', t => t.objectStore(store).delete(id)); }
+
+// --- Outbox (changements à envoyer au serveur) ---
+export async function outboxAll() { return tx(['outbox'], 'readonly', t => req(t.objectStore('outbox').getAll())); }
+export async function outboxClear(seqs) {
+  if (!seqs.length) return;
+  return tx(['outbox'], 'readwrite', t => { const os = t.objectStore('outbox'); seqs.forEach(k => os.delete(k)); });
+}
+export async function outboxCount(stores) {
+  const all = await outboxAll();
+  return new Set(all.filter(o => !stores || stores.includes(o.store)).map(o => o.store + '|' + o.recordId)).size;
+}
+/** Efface toutes les données locales (déconnexion) */
+export async function wipe() {
+  await tx(STORES, 'readwrite', t => { for (const s of STORES) t.objectStore(s).clear(); });
+  urlCache.clear();
 }
 /** Suppression logique (deleted=true) pour pouvoir la propager lors d'une synchro */
 export async function remove(store, id) {
@@ -75,7 +103,20 @@ export async function putBlob(blob, id = uid()) {
   await tx(['blobs'], 'readwrite', t => t.objectStore('blobs').put({ id, blob, type: blob.type, updatedAt: new Date().toISOString() }));
   return id;
 }
-export async function getBlob(id) { return (await get('blobs', id))?.blob || null; }
+export async function getBlob(id) {
+  const local = (await get('blobs', id))?.blob;
+  if (local || !blobResolver) return local || null;
+  const remote = await blobResolver(id).catch(() => null); // téléchargement depuis le serveur si absent
+  if (remote) { await tx(['blobs'], 'readwrite', t => t.objectStore('blobs').put({ id, blob: remote, type: remote.type, synced: true })); }
+  return remote;
+}
+let blobResolver = null;
+export const setBlobResolver = f => { blobResolver = f; };
+export async function blobRecord(id) { return get('blobs', id); }
+export async function markBlobSynced(id) {
+  const r = await get('blobs', id); if (!r) return;
+  r.synced = true; await tx(['blobs'], 'readwrite', t => t.objectStore('blobs').put(r));
+}
 export async function deleteBlob(id) { return tx(['blobs'], 'readwrite', t => t.objectStore('blobs').delete(id)); }
 
 const urlCache = new Map();

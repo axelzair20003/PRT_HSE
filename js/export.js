@@ -123,7 +123,7 @@ export async function buildPDF(insp) {
   doc.autoTable({
     startY: 24, theme: 'grid', styles: { fontSize: 10 }, columnStyles: { 0: { fontStyle: 'bold', cellWidth: 55, fillColor: [238, 241, 245] } },
     body: [
-      ['Project / Site', insp.site || ''], ['Sub-Contractor', `${sub.name || ''}${sub.company ? ' — ' + sub.company : ''}`],
+      ['Project / Site', insp.site || ''], ['Sub-Contractor', sub.name || ''],
       ['Inspection Date', dateFR(insp.date)], ['Inspector(s)', insp.inspectors || ''], ['Inspection Reference', insp.ref],
       ['Location', `${plan?.name || ''}${insp.zone ? ' — ' + insp.zone : ''}`],
       ['BE SAFE Bonus Points', String(Number(insp.bonus) || 0)], ['LSR Penalty Points', String(Number(insp.penalty) || 0)],

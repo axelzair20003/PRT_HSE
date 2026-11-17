@@ -1,3 +1,4 @@
+import { ic } from './icons.js';
 // Visionneuse de plan : zoom au pincement, déplacement au doigt, tap pour poser une épingle.
 // Coordonnées des épingles normalisées (0–1) par rapport à l'image du plan.
 
@@ -8,9 +9,9 @@ export function createPlanViewer(container, opts) {
   container.innerHTML = `
     <div class="pv-stage"><img class="pv-img" alt="Plan" draggable="false"><div class="pv-pins"></div></div>
     <div class="pv-ctrl">
-      <button type="button" data-z="in" aria-label="Zoom avant">＋</button>
-      <button type="button" data-z="out" aria-label="Zoom arrière">－</button>
-      <button type="button" data-z="fit" aria-label="Ajuster">⤢</button>
+      <button type="button" data-z="in" aria-label="Zoom avant">${ic('plus')}</button>
+      <button type="button" data-z="out" aria-label="Zoom arrière">${ic('minus')}</button>
+      <button type="button" data-z="fit" aria-label="Ajuster">${ic('fit')}</button>
     </div>`;
   const stage = container.querySelector('.pv-stage');
   const img = container.querySelector('.pv-img');
@@ -21,10 +22,12 @@ export function createPlanViewer(container, opts) {
     stage.style.transform = `translate(${tx}px,${ty}px) scale(${s})`;
     stage.style.setProperty('--inv', 1 / s);
   };
-  const fit = () => {
+  // cover = le plan remplit tout l'écran (on se déplace au doigt) ; sinon il est entièrement visible
+  const fit = (cover = false) => {
     const r = container.getBoundingClientRect();
-    s = Math.min(r.width / W, r.height / H) || 1;
-    minS = s * 0.8;
+    const contain = Math.min(r.width / W, r.height / H) || 1;
+    s = cover ? Math.min(Math.max(r.width / W, r.height / H), contain * 1.7) : contain;
+    minS = contain * 0.8;
     tx = (r.width - W * s) / 2; ty = (r.height - H * s) / 2;
     apply();
   };
@@ -52,7 +55,7 @@ export function createPlanViewer(container, opts) {
     }
   };
 
-  img.onload = () => { W = img.naturalWidth; H = img.naturalHeight; stage.style.width = W + 'px'; stage.style.height = H + 'px'; fit(); renderPins(); if (opts.focus) focus(opts.focus.x, opts.focus.y); };
+  img.onload = () => { W = img.naturalWidth; H = img.naturalHeight; stage.style.width = W + 'px'; stage.style.height = H + 'px'; fit(!!opts.cover); renderPins(); if (opts.focus) focus(opts.focus.x, opts.focus.y); };
   img.src = imageURL;
 
   // --- gestes ---
@@ -109,7 +112,7 @@ export function createPlanViewer(container, opts) {
     const r = container.getBoundingClientRect();
     if (z === 'fit') fit(); else zoomAt(z === 'in' ? 1.6 : 1 / 1.6, r.width / 2, r.height / 2);
   });
-  const ro = new ResizeObserver(() => { if (W > 1) fit(); });
+  const ro = new ResizeObserver(() => { if (W > 1) fit(!!opts.cover); });
   ro.observe(container);
 
   return {

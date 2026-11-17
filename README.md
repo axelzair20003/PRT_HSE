@@ -10,7 +10,8 @@ css/app.css                               → design (fort contraste, boutons �
 js/prt-data.js                            → les 19 thèmes / 124 critères (générés depuis l'Excel)
 js/calc.js                                → logique de calcul (fonctions pures)
 js/db.js                                  → IndexedDB + journal "outbox" (prévu pour une synchro future)
-js/sync.js                                → point d'extension Supabase / SharePoint (vide en V1)
+js/cloud.js + js/config.js               → connexion et synchronisation Supabase (mode équipe)
+supabase/schema.sql                       → base de données + règles d’accès à coller dans Supabase
 js/plan.js                                → plan zoomable + épingles
 js/images.js                              → compression photos, import PDF/image du plan
 js/export.js                              → Excel 4 feuilles, PDF, partage iOS
@@ -49,7 +50,7 @@ Alternative Netlify : app.netlify.com → **Add new site → Deploy manually** �
 ## 3. Plan et sous-traitants : déjà intégrés
 Au premier lancement, l'app charge automatiquement :
 - le plan **SAM 2A — vue aérienne** (`assets/plan-sam2a.jpg`, code `SAM2A` → références `PRT-SAM2A-2026-001`) ;
-- les 8 sous-traitants du fichier GSafe BOTG SAM2A : Betocor, Blocotelha, Borgel, Hommema, JDN/Besix, Reditec, TRBA, VKE ;
+- 10 sous-traitants : Alphascaff, Betocor, Blocotelha, Borgel, Hommema, JDN/Besix, Reditec, TRBA, Unitec, VKE (modifiable dans l'onglet Sous-traitants) ;
 - les 70 zones du fichier (« Roof DCH4 », « UTI 11 »…) en suggestions dans le champ Zone.
 
 **Démarrer une inspection = 1 tap** sur le sous-traitant depuis l'accueil. L'inspecteur (« Ahmed » par défaut, modifiable dans Réglages), la date, le site et le plan sont remplis tout seuls. Placer la zone sur le plan est facultatif (carte « 📍 Placer la zone » dans l'inspection).
@@ -63,5 +64,36 @@ Pour remplacer le plan : remplacer `assets/plan-sam2a.jpg` par une image du mêm
 - **Exporter / Partager** : Excel (4 feuilles identiques à l'original), PDF (résumé, détail, photos, plan avec épingles, actions) → Mail, WhatsApp, Teams.
 - Plan : filtres sous-traitant / type / thème / priorité / statut ; tap sur le plan = nouvelle observation libre à cet endroit.
 
-## Synchronisation future
-Tous les enregistrements ont un UUID, `createdAt`, `updatedAt` et une suppression logique (`deleted`). Chaque écriture est journalisée dans le store `outbox`. Brancher un adaptateur `push/pull` dans `js/sync.js` (Supabase ou Microsoft Graph pour SharePoint) suffit pour synchroniser.
+## Mode équipe (connexion + Ahmed voit tout) — Supabase gratuit
+
+Tant que `js/config.js` est vide, l'app fonctionne **100 % en local** (comme avant).
+Une fois configurée :
+- connexion par **email + mot de passe**, sur **invitation** de l'administrateur ;
+- chaque **inspecteur** fait tout le processus et ne voit **que ses audits et actions** ;
+- l'**administrateur (Ahmed)** voit **les audits de toute l'équipe** (plan, actions, classement, exports) et gère l'équipe (Réglages → Équipe) ;
+- tout reste utilisable **hors ligne** : l'envoi se fait automatiquement au retour du réseau ;
+- le cloisonnement est appliqué **par le serveur** (Row Level Security), pas seulement par l'app.
+
+### Mise en route (≈ 15 min, une seule fois)
+1. **Créer le projet** : supabase.com → *Start your project* → se connecter (idéalement avec le compte d'Ahmed) → *New project* → nom `prt-hse`, région **Central EU (Frankfurt)**, mot de passe de base de données (à garder) → *Create*.
+2. **Créer la base** : menu **SQL Editor** → *New query* → coller tout le fichier `supabase/schema.sql` → **remplacer `ADRESSE-EMAIL-AHMED@exemple.com`** (tout en bas) par l'email d'Ahmed → **Run**.
+3. **Désactiver la confirmation par email** : **Authentication → Sign In / Providers → Email** → décocher **Confirm email** → *Save*.
+   (Le service email gratuit de Supabase n'envoie que ~2 emails/heure : on n'en a pas besoin.)
+4. **Récupérer les 2 valeurs** : **Project Settings → API** (ou *Data API* / *API Keys*) :
+   - *Project URL* (ex. `https://abcd1234.supabase.co`)
+   - clé **publishable** ou **anon public** (jamais la clé *secret* / *service_role*)
+5. **Les coller dans `js/config.js`** sur GitHub (crayon ✏️ → modifier → *Commit changes*) :
+   ```js
+   export const CLOUD = { url: 'https://abcd1234.supabase.co', anonKey: 'sb_publishable_…' };
+   ```
+   puis changer `CACHE` dans `sw.js` (ex. `prt-hse-v2.0.1`) → *Commit changes*.
+6. **Ahmed se connecte en premier** : ouvrir l'app → *Créer mon compte* avec son email → il est administrateur et envoie les sous-traitants et le plan au serveur.
+7. **Inviter l'équipe** : Réglages → **Équipe et invitations** → nom + email → *Inviter*. La personne ouvre l'app → *Créer mon compte* avec cette adresse.
+
+### Au quotidien
+- **Bloquer un accès** : Réglages → Équipe → *Bloquer* (ses audits restent visibles pour l'admin).
+- **Mot de passe oublié** : supprimer l'utilisateur dans Supabase (**Authentication → Users**) ; l'invitation reste valable, il recrée son compte.
+- **Gratuit** : 500 Mo de base (des dizaines de milliers d'audits), 1 Go de photos (≈ 5 000 photos), 50 000 utilisateurs/mois. Un projet gratuit est mis en pause après 7 jours sans activité : les données sont conservées, il suffit de le relancer depuis supabase.com.
+- **Pas de sauvegarde automatique** en gratuit : Ahmed fait régulièrement Réglages → *Excel — toutes les inspections* et *Sauvegarde complète*.
+- **Données personnelles** : photos de chantier et noms de sous-traitants sont hébergés chez Supabase (UE). À valider avec Jan De Nul si nécessaire.
+

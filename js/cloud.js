@@ -1,0 +1,209 @@
+// Connexion + synchronisation avec Supabase.
+// Principe : l'app reste 100 % utilisable hors ligne. Chaque écriture locale est
+// journalisée (outbox) puis envoyée dès qu'il y a du réseau ; les données des autres
+// (visibles uniquement par l'admin, filtrées par le serveur) sont récupérées en retour.
+import { CLOUD } from './config.js';
+import * as db from './db.js';
+
+export const enabled = !!(CLOUD.url && CLOUD.anonKey);
+let sb = null;
+export let session = null;
+export let profile = null;
+
+const KIND = { inspections: 'inspection', actions: 'action', subs: 'sub', plans: 'plan' };
+const STORE = Object.fromEntries(Object.entries(KIND).map(([k, v]) => [v, k]));
+
+// ---------- état de synchro (affiché dans l'app) ----------
+export const status = { state: 'idle', pending: 0, last: null, error: null };
+const listeners = new Set();
+export const onStatus = f => { listeners.add(f); return () => listeners.delete(f); };
+const emit = p => { Object.assign(status, p); listeners.forEach(f => f(status)); };
+
+export const uid = () => session?.user?.id || null;
+export const isAdmin = () => !enabled || profile?.role === 'admin';
+export const myName = () => profile?.name || profile?.email || '';
+
+export async function init() {
+  if (!enabled) return;
+  sb = window.supabase.createClient(CLOUD.url, CLOUD.anonKey, {
+    auth: { persistSession: true, autoRefreshToken: true, storageKey: 'prt-hse-auth' },
+  });
+  session = (await sb.auth.getSession()).data.session; // lu en local : marche hors ligne
+  sb.auth.onAuthStateChange((_e, s) => { session = s; });
+  if (session) await loadProfile();
+  db.setBlobResolver(fetchBlob);
+  db.onWrite(store => { if (KIND[store]) syncSoon(); });
+  window.addEventListener('online', () => syncSoon(300));
+  setInterval(() => syncSoon(0), 60_000);
+  await refreshPending();
+}
+
+async function loadProfile() {
+  try {
+    const { data, error } = await sb.from('profiles').select('*').eq('id', uid()).single();
+    if (error) throw error;
+    profile = data; await db.setMeta('profile', data);
+  } catch { profile = await db.getMeta('profile'); }
+}
+
+const friendly = e => {
+  const m = e?.message || String(e);
+  if (/invalid login/i.test(m)) return new Error('Email ou mot de passe incorrect.');
+  if (/database error saving new user|not invited/i.test(m)) return new Error('Cette adresse n’a pas été invitée. Demandez à Ahmed de vous ajouter.');
+  if (/already registered|already been registered/i.test(m)) return new Error('Ce compte existe déjà : utilisez « Se connecter ».');
+  if (/password should|at least/i.test(m)) return new Error('Mot de passe trop court (8 caractères minimum).');
+  if (/fetch|network/i.test(m)) return new Error('Pas de connexion internet. La première connexion nécessite du réseau.');
+  return new Error(m);
+};
+
+export async function signIn(email, password) {
+  const { data, error } = await sb.auth.signInWithPassword({ email: email.trim().toLowerCase(), password });
+  if (error) throw friendly(error);
+  session = data.session; await loadProfile(); await afterLogin();
+}
+export async function signUp(email, password, name) {
+  const { data, error } = await sb.auth.signUp({ email: email.trim().toLowerCase(), password, options: { data: { name: name.trim() } } });
+  if (error) throw friendly(error);
+  if (!data.session) throw new Error('Compte créé, mais Supabase demande une confirmation par email : désactivez « Confirm email » (voir guide).');
+  session = data.session; await loadProfile(); await afterLogin();
+}
+export async function signOut() {
+  try { await sync(); } catch { /* on déconnecte quand même */ }
+  const left = await db.outboxCount(Object.keys(KIND));
+  if (left) throw new Error(`${left} élément(s) pas encore envoyé(s). Connectez-vous à internet avant de vous déconnecter.`);
+  await sb.auth.signOut();
+  await db.wipe();
+}
+
+/** Les audits faits avant la connexion deviennent ceux de l'utilisateur */
+async function afterLogin() {
+  for (const store of ['inspections', 'actions']) {
+    for (const r of await db.all(store, { includeDeleted: true })) if (!r.owner) await db.put(store, { ...r, owner: uid() });
+  }
+  if (!isAdmin()) { // l'inspecteur reçoit les sous-traitants/plans du serveur
+    for (const store of ['subs', 'plans']) {
+      const ids = (await db.outboxAll()).filter(o => o.store === store).map(o => o.seq);
+      await db.outboxClear(ids);
+    }
+  }
+  await sync();
+}
+
+// ---------- synchronisation ----------
+let timer = null, running = null;
+export function syncSoon(ms = 2500) {
+  if (!enabled || !session) return;
+  clearTimeout(timer); timer = setTimeout(() => sync().catch(() => {}), ms);
+}
+export async function refreshPending() {
+  if (!enabled) return;
+  emit({ pending: await db.outboxCount(Object.keys(KIND)) });
+}
+export function sync() {
+  if (!enabled || !session) return Promise.resolve();
+  if (running) return running;
+  running = (async () => {
+    if (!navigator.onLine) { emit({ state: 'offline' }); await refreshPending(); return; }
+    emit({ state: 'syncing', error: null });
+    try {
+      await push();
+      await pull();
+      await db.setMeta('lastSync', new Date().toISOString());
+      emit({ state: 'ok', last: new Date().toISOString() });
+    } catch (e) {
+      console.warn('sync', e);
+      emit({ state: navigator.onLine ? 'error' : 'offline', error: friendly(e).message });
+    } finally { await refreshPending(); }
+  })().finally(() => { running = null; });
+  return running;
+}
+
+const photosOf = (store, r) => store === 'inspections' ? Object.values(r.scores || {}).flatMap(s => s?.photos || [])
+  : store === 'actions' ? (r.photos || []) : store === 'plans' ? [r.blobId] : store === 'subs' ? [r.logoId] : [];
+const blobPath = (store, owner, id) => (store === 'plans' || store === 'subs') ? { bucket: 'shared', path: id } : { bucket: 'photos', path: `${owner}/${id}` };
+
+async function push() {
+  const out = await db.outboxAll();
+  const groups = new Map();
+  const done = [];
+  for (const o of out) {
+    if (!KIND[o.store]) { done.push(o.seq); continue; }
+    const k = o.store + '|' + o.recordId;
+    (groups.get(k) || groups.set(k, []).get(k)).push(o);
+  }
+  for (const [, list] of groups) {
+    const { store, recordId } = list[0];
+    const seqs = list.map(o => o.seq);
+    const rec = await db.get(store, recordId);
+    if (!rec || ((store === 'subs' || store === 'plans') && !isAdmin())) { done.push(...seqs); continue; }
+    const owner = rec.owner || uid();
+    for (const id of photosOf(store, rec).filter(Boolean)) await uploadBlob(id, blobPath(store, owner, id));
+    const { error } = await sb.from('docs').upsert({
+      id: rec.id, kind: KIND[store], owner, data: { ...rec, owner }, updated_at: rec.updatedAt || new Date().toISOString(), deleted: !!rec.deleted,
+    });
+    if (error) throw error;
+    done.push(...seqs);
+  }
+  await db.outboxClear(done);
+}
+
+async function uploadBlob(id, { bucket, path }) {
+  const r = await db.blobRecord(id);
+  if (!r || r.synced) return;
+  const { error } = await sb.storage.from(bucket).upload(path, r.blob, { upsert: true, contentType: r.type || 'image/jpeg' });
+  if (error && !/exists/i.test(error.message)) throw error;
+  await db.markBlobSynced(id);
+}
+
+async function pull() {
+  let since = await db.getMeta('lastPull', '1970-01-01T00:00:00Z');
+  const paths = await db.getMeta('blobPaths', {});
+  for (;;) {
+    const { data, error } = await sb.from('docs').select('*').gt('updated_at', since).order('updated_at').limit(500);
+    if (error) throw error;
+    for (const row of data) {
+      const store = STORE[row.kind];
+      const local = await db.get(store, row.id);
+      const pending = (await db.outboxAll()).some(o => o.store === store && o.recordId === row.id);
+      if (!pending && (!local || (local.updatedAt || '') <= row.updated_at)) {
+        await db.putRaw(store, { ...row.data, owner: row.owner, deleted: row.deleted, updatedAt: row.updated_at });
+      }
+      for (const id of photosOf(store, row.data).filter(Boolean)) paths[id] = blobPath(store, row.owner, id);
+      since = row.updated_at;
+    }
+    if (data.length < 500) break;
+  }
+  await db.setMeta('blobPaths', paths);
+  await db.setMeta('lastPull', since);
+}
+
+async function fetchBlob(id) {
+  if (!session || !navigator.onLine) return null;
+  const p = (await db.getMeta('blobPaths', {}))[id];
+  if (!p) return null;
+  const { data, error } = await sb.storage.from(p.bucket).download(p.path);
+  return error ? null : data;
+}
+
+// ---------- équipe (admin) ----------
+export async function team() {
+  const [p, i] = await Promise.all([sb.from('profiles').select('*').order('name'), sb.from('invites').select('*').order('created_at')]);
+  if (p.error) throw friendly(p.error);
+  if (i.error) throw friendly(i.error);
+  await db.setMeta('profiles', Object.fromEntries(p.data.map(x => [x.id, { name: x.name, email: x.email }])));
+  return { profiles: p.data, invites: i.data };
+}
+export async function invite(email, name, role = 'inspector') {
+  const { error } = await sb.from('invites').upsert({ email: email.trim().toLowerCase(), name: name.trim(), role });
+  if (error) throw friendly(error);
+}
+export async function removeInvite(email) {
+  const { error } = await sb.from('invites').delete().eq('email', email);
+  if (error) throw friendly(error);
+}
+export async function setActive(id, active) {
+  const { error } = await sb.from('profiles').update({ active }).eq('id', id);
+  if (error) throw friendly(error);
+}
+/** Noms des inspecteurs (cache local pour l'affichage hors ligne) */
+export async function names() { return await db.getMeta('profiles', {}); }
