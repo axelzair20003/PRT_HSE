@@ -26,7 +26,7 @@ export function createPlanViewer(container, opts) {
   const fit = (cover = false) => {
     const r = container.getBoundingClientRect();
     const contain = Math.min(r.width / W, r.height / H) || 1;
-    s = cover ? Math.min(Math.max(r.width / W, r.height / H), contain * 1.7) : contain;
+    s = cover ? Math.min(Math.max(r.width / W, r.height / H), contain * (typeof cover === 'number' ? cover : 1.7)) : contain;
     minS = contain * 0.8;
     tx = (r.width - W * s) / 2; ty = (r.height - H * s) / 2;
     apply();
@@ -55,7 +55,7 @@ export function createPlanViewer(container, opts) {
     }
   };
 
-  img.onload = () => { W = img.naturalWidth; H = img.naturalHeight; stage.style.width = W + 'px'; stage.style.height = H + 'px'; fit(!!opts.cover); renderPins(); if (opts.focus) focus(opts.focus.x, opts.focus.y); };
+  img.onload = () => { W = img.naturalWidth; H = img.naturalHeight; stage.style.width = W + 'px'; stage.style.height = H + 'px'; fit(opts.cover); renderPins(); if (opts.focus) focus(opts.focus.x, opts.focus.y); };
   img.src = imageURL;
 
   // --- gestes ---
@@ -112,7 +112,7 @@ export function createPlanViewer(container, opts) {
     const r = container.getBoundingClientRect();
     if (z === 'fit') fit(); else zoomAt(z === 'in' ? 1.6 : 1 / 1.6, r.width / 2, r.height / 2);
   });
-  const ro = new ResizeObserver(() => { if (W > 1) fit(!!opts.cover); });
+  const ro = new ResizeObserver(() => { if (W > 1) fit(opts.cover); });
   ro.observe(container);
 
   return {

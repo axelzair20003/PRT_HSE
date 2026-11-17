@@ -9,7 +9,7 @@ import * as cloud from './cloud.js';
 import { SEED_SUBS, SEED_LOCATIONS, SEED_PLAN, SEED_SITE } from './seed.js';
 import { buildXLSX, buildPDF, shareFile, download, canShareFile, actionRef } from './export.js';
 
-export const APP_VERSION = '2.0.0';
+export const APP_VERSION = '2.4.0';
 
 // ---------- utilitaires ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -26,7 +26,7 @@ const debounce = (fn, ms = 400) => {
   d.flush = (...a) => { clearTimeout(t); pendingSaves.delete(d); return fn(...a); };
   return d;
 };
-const PALETTE = ['#1A56A8', '#C62828', '#2E7D32', '#EF6C00', '#6A1B9A', '#00838F', '#AD1457', '#5D4037', '#F9A825', '#37474F'];
+const PALETTE = ['#E65100', '#6D4C41', '#C62828', '#00897B', '#AD1457', '#1565C0', '#6A1B9A', '#2E7D32', '#F9A825', '#455A64', '#00ACC1', '#7CB342'];
 const PRIOS = ['High', 'Medium', 'Low'];
 const PRIO_FR = { High: 'Haute', Medium: 'Moyenne', Low: 'Basse' };
 const STATUSES = ['Open', 'In progress', 'Closed'];
@@ -101,16 +101,18 @@ function applyTheme(t) {
 
 async function maps() {
   const [subs, plans] = await Promise.all([db.all('subs', { includeDeleted: true }), db.all('plans')]);
-  return { subs: Object.fromEntries(subs.map(s => [s.id, s])), subList: subs.filter(s => !s.deleted), plans: Object.fromEntries(plans.map(p => [p.id, p])), planList: plans };
+  return { subs: Object.fromEntries(subs.map(s => [s.id, s])), subList: subs.filter(s => !s.deleted && (s.name || '').trim()), plans: Object.fromEntries(plans.map(p => [p.id, p])), planList: plans };
 }
 
-async function nextRef(plan, date) {
-  const code = (plan?.code || plan?.name || 'SITE').toUpperCase().replace(/[^A-Z0-9]+/g, '').slice(0, 10) || 'SITE';
-  const ini = cloud.enabled ? (cloud.myName() || 'X').split(/[\s.@_-]+/).filter(Boolean).map(w => w[0]).join('').toUpperCase().slice(0, 3) : '';
-  const prefix = `PRT-${code}-${(date || todayISO()).slice(0, 4)}-${ini}`;
+async function nextRef(plan, sub, date) {
+  const clean = (t, n) => (t || '').toUpperCase().replace(/[^A-Z0-9]+/g, '').slice(0, n);
+  const site = clean(plan?.code || plan?.name, 10) || 'SITE';
+  const ini = cloud.enabled ? '-' + clean((cloud.myName() || 'X').split(/[\s.@_-]+/).filter(Boolean).map(w => w[0]).join(''), 3) : '';
+  const base = `PRT-${site}-${clean(sub?.name, 12) || 'SUB'}-${date || todayISO()}${ini}`;
   const all = await db.all('inspections', { includeDeleted: true });
-  const max = all.filter(i => i.ref?.startsWith(prefix)).map(i => parseInt(i.ref.slice(prefix.length), 10) || 0).reduce((a, b) => Math.max(a, b), 0);
-  return prefix + String(max + 1).padStart(3, '0');
+  let ref = base, n = 1;
+  while (all.some(i => i.ref === ref)) ref = `${base}-${++n}`;
+  return ref;
 }
 
 async function createAction(insp, { critRef = '', observation = '', priority = 'Medium', subId, planId, pin } = {}) {
@@ -171,41 +173,89 @@ async function vHome() {
 
 function subGrid(subList, insps = [], acts = []) {
   const active = subList.filter(s => !s.archived).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  const today = todayISO();
   return `<div class="sub-grid">${active.map(s => {
-    const last = insps.filter(i => i.subId === s.id).sort((a, b) => b.date.localeCompare(a.date))[0];
+    const mine = insps.filter(i => i.subId === s.id).sort((a, b) => b.date.localeCompare(a.date));
+    const last = mine[0];
     const pct = last ? overallScore(last.scores, last.bonus, last.penalty).pct : null;
     const open = acts.filter(a => a.subId === s.id && a.status !== 'Closed').length;
-    return `<button type="button" data-start="${s.id}" style="--c:${esc(s.color)}">
-      <b>${esc(s.name)}</b>
-      <span class="meta">${last ? `<i style="background:${rating(pct).color}"></i>${pct === null ? 'N/A' : Math.round(pct * 100) + ' %'}` : '&nbsp;'}${open ? ` · ${open} action${open > 1 ? 's' : ''}` : ''}</span>
+    const late = acts.filter(a => a.subId === s.id && isLate(a)).length;
+    const r = rating(pct);
+    const status = last?.date === today ? '<span class="tile-tag">En cours</span>'
+      : last ? `<span class="tile-score" style="background:${r.color};color:${r.fg}">${pct === null ? 'N/A' : Math.round(pct * 100) + '%'}</span><span>${dateFR(last.date).slice(0, 5)}</span>`
+      : '<span class="tile-none">Aucun audit</span>';
+    return `<button type="button" class="sub-tile" data-start="${s.id}" style="--c:${esc(s.color)}">
+      <span class="tile-top"><span class="mono">${esc(abbr(s.name))}</span><b>${esc(s.name)}</b></span>
+      <span class="tile-meta">${status}${open ? `<span class="tile-act ${late ? 'late' : ''}">${ic('list', 14)}${open}</span>` : ''}</span>
     </button>`;
   }).join('')}</div>`;
 }
 function bindSubGrid() {
   view.querySelectorAll('[data-start]').forEach(b => b.onclick = () => startInspection(b.dataset.start));
 }
+// ---------- démarrage d'un audit : 1 tap sous-traitant → 1 tap zone (ou « Passer ») ----------
 async function startInspection(subId) {
   // même sous-traitant déjà audité aujourd'hui → on reprend cet audit (pas de doublon)
   const today = (await db.byIndex('inspections', 'subId', subId)).find(i => i.date === todayISO());
   if (today) { location.hash = '#/insp/' + today.id; return; }
+  location.hash = '#/start/' + subId;
+}
+async function createInspection(subId, pin) {
   const st = await getSettings();
   const plans = await db.all('plans');
   const last = await db.getMeta('lastPlan');
   const plan = plans.find(p => p.id === last) || plans[0] || null;
+  const sub = await db.get('subs', subId);
   const date = todayISO();
-  const ref = await nextRef(plan, date);
-  const insp = await db.put('inspections', { owner: cloud.uid(), subId, planId: plan?.id || null, pin: null, zone: '', inspectors: cloud.enabled ? cloud.myName() : st.inspector, date, site: st.site, ref, scores: {}, bonus: 0, penalty: 0 });
-  location.replace('#/insp/' + insp.id); // pas d'entrée d'historique : « retour » ne recrée pas d'inspection
+  const ref = await nextRef(plan, sub, date);
+  return db.put('inspections', { owner: cloud.uid(), subId, planId: plan?.id || null, pin: pin || null, zone: '', inspectors: cloud.enabled ? cloud.myName() : st.inspector, date, site: st.site, ref, scores: {}, bonus: 0, penalty: 0 });
 }
+async function vStart(subId) {
+  const { subs, plans, planList } = await maps();
+  const sub = subs[subId]; if (!sub) return vNotFound();
+  view.classList.add('full', 'map-page');
+  setTop({ title: sub.name, sub: 'Nouvel audit · ' + dateFR(todayISO()), back: '#/' });
+  const plan = plans[await db.getMeta('lastPlan')] || planList[0];
+  let pin = null;
+  view.innerHTML = `
+    <div class="start-hint">${ic('pin', 20)}<span>Touchez la zone inspectée sur le plan</span></div>
+    <div id="spick" class="pv start-map"></div>
+    <div class="start-bar">
+      <button class="btn" id="skip">Passer</button>
+      <button class="btn primary" id="go" disabled>Commencer l’audit</button>
+    </div>`;
+  if (!plan) { $('#go').disabled = false; }
+  let pv = null;
+  if (plan) {
+    pv = createPlanViewer($('#spick'), {
+      imageURL: await db.blobURL(plan.blobId), pins: [], cover: 2.4,
+      onTap: (x, y) => { pin = { x, y }; pv.setPins([{ id: 'p', x, y, color: sub.color, label: abbr(sub.name), ghost: true }]); $('#go').disabled = false; navigator.vibrate?.(15); },
+    });
+    onCleanup(() => pv.destroy());
+  }
+  const go = async withPin => {
+    $('#go').disabled = $('#skip').disabled = true;
+    const insp = await createInspection(subId, withPin ? pin : null);
+    location.replace('#/insp/' + insp.id); // « retour » ne recrée pas d'audit
+  };
+  $('#go').onclick = () => go(true);
+  $('#skip').onclick = () => go(false);
+}
+/** Abréviation affichée dans les épingles : 3 premières lettres */
+const abbr = name => (name || '?').replace(/[^A-Za-z0-9]/g, '').slice(0, 3).toUpperCase();
 
 function inspCard(i, subs) {
   const o = overallScore(i.scores, i.bonus, i.penalty);
   const done = o.themes.reduce((a, t) => a + t.done, 0);
-  return `<a class="card link row" href="#/insp/${i.id}">
-    <div class="grow"><div class="row wrap">${subChip(subs[i.subId])}<span class="muted small">${dateFR(i.date)}</span></div>
-      <div style="font-weight:700;margin-top:4px">${esc(i.ref)}</div>
-      <div class="muted small ellip">${cloud.enabled && cloud.isAdmin() && i.owner !== cloud.uid() ? `<b>${esc(i.inspectors || '')}</b> · ` : ''}${i.zone ? esc(i.zone) + ' · ' : ''}${done}/124 critères</div></div>
-    ${badge(o.pct)}</a>`;
+  const s = subs[i.subId];
+  const who = cloud.enabled && cloud.isAdmin() && i.owner !== cloud.uid() ? `${esc(i.inspectors || '')} · ` : '';
+  return `<a class="card link insp-card" href="#/insp/${i.id}" style="--c:${esc(s?.color || '#9E9E9E')}">
+    <div class="grow">
+      <b class="insp-sub">${esc(s?.name || 'Sous-traitant supprimé')}</b>
+      <div class="insp-meta">${who}${dateFR(i.date)} · ${done}/124 critères</div>
+      ${i.pin || i.zone ? `<div class="insp-loc">${ic('pin', 14)} ${esc(i.zone || 'Localisé sur le plan')}</div>` : ''}
+    </div>
+    ${o.pct === null ? '<span class="badge none">—</span>' : badge(o.pct)}</a>`;
 }
 const daysTo = d => Math.round((new Date(d + 'T12:00:00') - new Date(todayISO() + 'T12:00:00')) / 864e5);
 function dueChip(a) {
@@ -218,9 +268,9 @@ function dueChip(a) {
 }
 function actionCard(a, subs) {
   return `<a class="card link act-card prio-${a.priority}" href="#/action/${a.id}">
-    <div class="row">${subChip(subs[a.subId])}<span class="prio-txt">${a.priority}</span><span class="grow"></span>${dueChip(a)}</div>
+    <div class="row">${subChip(subs[a.subId])}<span class="prio-txt p-${a.priority}">${PRIO_FR[a.priority] || a.priority}</span><span class="grow"></span>${dueChip(a)}</div>
     <div class="act-title">${esc(a.observation || 'Observation à compléter')}</div>
-    <div class="muted small ellip">${esc(actionRef(a) || 'Action libre')}${a.status === 'In progress' ? ' · En cours' : ''}</div></a>`;
+    <div class="muted small ellip">${esc(actionRef(a) || 'Action libre')}${a.status === 'In progress' ? ' · <b>En cours</b>' : ''}</div></a>`;
 }
 
 // ---------- formulaire inspection (création + modification) ----------
@@ -297,9 +347,22 @@ async function vInspEdit(id) {
   $('#form-foot').innerHTML = `<p class="muted small">Référence : <b>${esc(insp.ref)}</b> · enregistrement automatique</p>
     <button class="btn danger block" id="del">Supprimer l’inspection</button>`;
   $('#del').onclick = async () => {
-    if (!await confirmBox('Supprimer cette inspection ?', 'Les actions liées sont conservées.')) return;
-    await db.remove('inspections', id); location.replace('#/');
+    if (await confirmDeleteInspection(id, '')) location.replace('#/');
   };
+}
+
+async function deleteInspection(id) {
+  const insp = await db.get('inspections', id);
+  const acts = await db.byIndex('actions', 'inspectionId', id);
+  const photos = [...Object.values(insp?.scores || {}).flatMap(s => s?.photos || []), ...acts.flatMap(a => a.photos || [])];
+  for (const a of acts) await db.remove('actions', a.id);
+  await db.remove('inspections', id);
+  for (const p of photos) await db.deleteBlob(p).catch(() => {});
+}
+async function confirmDeleteInspection(id, name) {
+  const n = (await db.byIndex('actions', 'inspectionId', id)).length;
+  if (!await confirmBox(`Supprimer l’audit ${name || ''} ?`, n ? `L’audit et ses ${n} action${n > 1 ? 's' : ''} seront supprimés définitivement.` : 'L’audit sera supprimé définitivement.', 'Supprimer')) return false;
+  await deleteInspection(id); toast('Audit supprimé'); return true;
 }
 
 async function vInsp(id) {
@@ -307,31 +370,38 @@ async function vInsp(id) {
   if (!insp || insp.deleted) return vNotFound();
   const { subs, plans } = await maps();
   const sub = subs[insp.subId];
-  setTop({ title: sub?.name || insp.ref, sub: insp.ref, back: '#/', actions: [{ icon: 'edit', aria: 'Modifier', onClick: () => location.hash = `#/insp/${id}/edit` }] });
+  setTop({ title: sub?.name || 'Audit', sub: `Audit du ${dateFR(insp.date)}`, back: '#/', actions: [
+    { icon: 'trash', aria: 'Supprimer l’audit', onClick: async () => { if (await confirmDeleteInspection(id, sub?.name)) location.replace('#/'); } },
+    { icon: 'edit', aria: 'Modifier', onClick: () => location.hash = `#/insp/${id}/edit` }] });
   const acts = await db.byIndex('actions', 'inspectionId', id);
   const draw = () => {
     const o = overallScore(insp.scores, insp.bonus, insp.penalty);
+    const done = o.themes.reduce((a, t) => a + t.done, 0);
+    const next = o.themes.find(t => t.done < t.total);
     view.innerHTML = `
       <div class="card score-card">
         <div><div class="score-big" style="color:${o.pct === null ? 'var(--muted)' : o.rating.color}">${o.pct === null ? '—' : Math.round(o.pct * 100) + '<small>%</small>'}</div>
           ${o.pct === null ? '<span class="muted small">Pas encore noté</span>' : ratingChip(o.pct)}</div>
-        <div class="score-meta"><b>${o.themes.reduce((a, t) => a + t.done, 0)} / 124</b><span>critères</span>
-          <span class="muted small">${dateFR(insp.date)} · ${esc(insp.inspectors || '')}</span>${insp.zone ? `<span class="muted small">${esc(insp.zone)}</span>` : ''}</div>
+        <div class="score-meta"><b>${done} / 124</b><span>critères</span>
+          <span class="muted small">${esc(insp.inspectors || '')}</span></div>
       </div>
-      <div class="toolbar">
+      ${next ? `<a class="btn primary big" href="#/insp/${id}/t/${next.theme.ref}" style="margin-bottom:10px">${done ? 'Continuer' : 'Commencer'} : ${esc(next.theme.ref.replace('.0', ''))}. ${esc(next.theme.name)}</a>` : `<a class="btn primary big" href="#/insp/${id}/sum" style="margin-bottom:10px">${ic('check')} Audit complet — voir le résumé</a>`}
+      <a class="card link row loc-row" href="${insp.pin ? `#/map?plan=${insp.planId}&insp=${id}` : `#/insp/${id}/edit`}">
+        <span class="ic-round">${ic('pin')}</span>
+        <span class="grow"><b>${insp.pin ? (insp.zone ? esc(insp.zone) : 'Zone localisée') : 'Localiser sur le plan'}</b><div class="muted small">${insp.pin ? 'Voir sur le plan' : 'Facultatif'}</div></span>${ic('chevron')}</a>
+      <div class="toolbar three">
         <a href="#/insp/${id}/sum">${ic('file')}<span>Résumé</span></a>
         <button id="exp">${ic('share')}<span>Exporter</span></button>
-        <a href="${insp.pin ? `#/map?plan=${insp.planId}&insp=${id}` : `#/insp/${id}/edit`}">${ic('pin')}<span>${insp.pin ? 'Plan' : 'Localiser'}</span></a>
         <a href="#/actions?insp=${id}">${ic('list')}<span>Actions${acts.length ? ` (${acts.length})` : ''}</span></a>
       </div>
+      <div class="section-head"><span>Thèmes</span><span class="muted small">${o.countedThemes}/19 notés</span></div>
       ${o.themes.map(t => {
         const allNA = t.na === t.total;
-        return `<div class="card theme-card">
-          <a class="grow row" href="#/insp/${id}/t/${t.theme.ref}" style="color:inherit;text-decoration:none">
+        return `<div class="theme-row ${t.done === t.total ? 'complete' : ''}">
+          <a class="grow row" href="#/insp/${id}/t/${t.theme.ref}">
             <span class="num">${t.theme.ref.replace('.0', '')}</span>
-            <span class="grow"><b>${esc(t.theme.name)}</b><div class="muted small">${t.done} / ${t.total}${t.na ? ` · ${t.na} N/A` : ''}</div>
-            <div class="progress"><i style="width:${t.done / t.total * 100}%"></i></div></span>
-            ${t.done ? badge(t.pct) : '<span class="badge none">—</span>'}</a>
+            <span class="grow"><b>${esc(t.theme.name)}</b><span class="muted small">${allNA ? 'Non applicable' : `${t.done} / ${t.total}`}</span></span>
+            ${allNA ? '<span class="badge none">N/A</span>' : t.done ? badge(t.pct) : '<span class="badge none">—</span>'}</a>
           <button class="na-btn ${allNA ? 'on' : ''}" data-na="${t.theme.ref}" aria-label="Thème non applicable">N/A</button></div>`;
       }).join('')}`;
     $('#exp').onclick = () => exportSheet([insp]);
@@ -442,25 +512,25 @@ async function vSummary(id) {
   const insp = await db.get('inspections', id);
   if (!insp) return vNotFound();
   const { subs } = await maps();
-  setTop({ title: 'Résumé', sub: insp.ref, back: '#/insp/' + id, actions: [helpAction] });
+  setTop({ title: 'Résumé', sub: subs[insp.subId]?.name || '', back: '#/insp/' + id, actions: [helpAction] });
   const save = debounce(() => db.put('inspections', insp), 300);
   onCleanup(() => save.flush());
   view.innerHTML = `
-    <div class="card">
-      <label class="f">Project / Site</label><input class="in" data-k="site" value="${esc(insp.site || '')}">
-      <div class="btns" style="margin:0"><div><label class="f">Inspection Date</label><input class="in" type="date" data-k="date" value="${esc(insp.date)}"></div>
-      <div><label class="f">Inspection Reference</label><input class="in" value="${esc(insp.ref)}" readonly></div></div>
-      <label class="f">Inspector(s)</label><input class="in" data-k="inspectors" value="${esc(insp.inspectors || '')}">
-      <div class="muted small" style="margin-top:8px">Sous-traitant : ${subChip(subs[insp.subId])}</div>
-      <div class="btns" style="margin-bottom:0"><div><label class="f">BE SAFE Bonus Points</label><input class="in" type="number" inputmode="decimal" step="0.5" data-k="bonus" value="${Number(insp.bonus) || 0}"></div>
-      <div><label class="f">LSR Penalty Points</label><input class="in" type="number" inputmode="decimal" step="0.5" data-k="penalty" value="${Number(insp.penalty) || 0}"></div></div>
-    </div>
     <div id="sum-out"></div>
-    <button class="btn primary block" id="exp" style="margin-top:12px">${ic('share')} Exporter</button>`;
+    <button class="btn primary block" id="exp" style="margin:12px 0">${ic('share')} Exporter (Excel / PDF)</button>
+    <div class="section-head"><span>Informations</span></div>
+    <div class="card">
+      <div class="ref-line"><span class="muted small">Inspection Reference</span><b>${esc(insp.ref)}</b></div>
+      <label class="f">Project / Site</label><input class="in" data-k="site" value="${esc(insp.site || '')}">
+      <label class="f">Inspection Date</label><input class="in" type="date" data-k="date" value="${esc(insp.date)}">
+      <label class="f">Inspector(s)</label><input class="in" data-k="inspectors" value="${esc(insp.inspectors || '')}">
+      <div class="btns" style="margin-bottom:0"><div><label class="f">BE SAFE Bonus</label><input class="in" type="number" inputmode="decimal" step="0.5" data-k="bonus" value="${Number(insp.bonus) || 0}"></div>
+      <div><label class="f">LSR Penalty</label><input class="in" type="number" inputmode="decimal" step="0.5" data-k="penalty" value="${Number(insp.penalty) || 0}"></div></div>
+    </div>`;
   const draw = () => {
     const o = overallScore(insp.scores, insp.bonus, insp.penalty);
     $('#sum-out').innerHTML = `
-      <div class="overall" style="background:${o.rating.color};color:${o.rating.fg}"><div>Overall Site Score</div><b>${fmtPct(o.pct)}</b><span>${o.rating.name}</span>
+      <div class="overall" style="background:${o.rating.color};color:${o.rating.fg}"><div>Overall Site Score</div><b>${fmtPct(o.pct)}</b><span>${o.pct === null ? 'Pas encore noté' : o.rating.name}</span>
         <div class="small">${o.countedThemes}/19 thèmes notés</div></div>
       ${barChart(o.themes)}
       <table class="t" style="margin-top:12px"><tr><th>Theme</th><th class="r">Score %</th><th>Rating</th></tr>
@@ -552,31 +622,42 @@ async function vAction(id) {
   if (!a || a.deleted) return vNotFound();
   const { subs, subList, plans } = await maps();
   const insp = a.inspectionId ? await db.get('inspections', a.inspectionId) : null;
-  setTop({ title: 'Action', sub: a.critRef ? actionRef(a) : '', back: true });
+  setTop({ title: 'Action corrective', sub: PRIO_FR[a.priority] ? 'Priorité ' + PRIO_FR[a.priority].toLowerCase() : '', back: true });
   const save = debounce(() => db.put('actions', a), 300);
   onCleanup(() => save.flush());
   const crit = a.critRef ? criterionOfRef(a.critRef) : null;
   view.innerHTML = `
-    <div class="card">
-      <div class="row wrap">${subChip(subs[a.subId])}${insp ? `<a class="chip" style="background:var(--surface-2)" href="#/insp/${insp.id}">${esc(insp.ref)}</a>` : '<span class="chip" style="background:var(--surface-2)">Observation libre</span>'}</div>
-      ${crit ? `<div style="margin-top:8px"><b>Reference :</b> <a href="#/insp/${a.inspectionId}/t/${themeOfRef(a.critRef).ref}">${esc(actionRef(a))}</a></div>` : ''}
+    <div class="card act-head prio-${a.priority}">
+      <div class="row wrap">${subChip(subs[a.subId])}${dueChip(a)}</div>
+      <div class="act-head-title">${esc(a.observation || 'Observation à compléter')}</div>
+      <div class="muted small">${crit ? `<a href="#/insp/${a.inspectionId}/t/${themeOfRef(a.critRef).ref}">${esc(actionRef(a))}</a>` : 'Action libre'}${insp ? ` · <a href="#/insp/${insp.id}">audit du ${dateFR(insp.date)}</a>` : ''}</div>
+      <div class="seg status-seg" data-seg="status" style="margin-top:12px">${STATUSES.map(s => `<button type="button" data-val="${s}" class="${a.status === s ? 'on' : ''}">${STATUS_FR[s]}</button>`).join('')}</div>
     </div>
-    <label class="f">Sous-traitant</label>
-    <select class="in" data-k="subId">${subList.map(s => `<option value="${s.id}" ${s.id === a.subId ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>
-    ${crit ? '' : `<label class="f">Reference (critère)</label><select class="in" data-k="critRef"><option value="">—</option>${THEMES.map(t => `<optgroup label="${esc(t.ref + ' ' + t.name)}">${t.criteria.map(c => `<option value="${c.ref}" ${a.critRef === c.ref ? 'selected' : ''}>${c.ref} ${esc(c.name)}</option>`).join('')}</optgroup>`).join('')}</select>`}
-    <label class="f">Observation</label><textarea class="in" data-k="observation">${esc(a.observation)}</textarea>
-    <label class="f">Priority</label><div class="seg" data-seg="priority">${PRIOS.map(p => `<button type="button" data-val="${p}" class="${a.priority === p ? 'on' : ''}">${p}</button>`).join('')}</div>
-    <label class="f">Corrective Action Required</label><textarea class="in" data-k="corrective">${esc(a.corrective)}</textarea>
-    <label class="f">Responsibility</label><input class="in" data-k="responsibility" value="${esc(a.responsibility)}">
-    <label class="f">Due Date</label><input class="in" type="date" data-k="dueDate" value="${esc(a.dueDate || '')}">
-    <label class="f">Progress</label><div class="seg" data-seg="status">${STATUSES.map(s => `<button type="button" data-val="${s}" class="${a.status === s ? 'on' : ''}">${s}</button>`).join('')}</div>
-    <label class="f">Photos</label>
-    <label class="btn block">${ic('camera')} Ajouter une photo<input type="file" accept="image/*" capture="environment" class="hidden-input" id="a-photo" multiple></label>
-    <div class="thumbs" id="a-thumbs"></div>
-    <label class="f">Emplacement sur le plan ${a.planId ? '— ' + esc(plans[a.planId]?.name || '') : ''}</label>
-    ${a.planId && plans[a.planId] ? `<div id="a-plan" class="pv plan-box" style="height:42vh"></div>
+
+    <div class="section-head"><span>Constat</span></div>
+    <div class="card">
+      <label class="f" style="margin-top:0">Observation</label><textarea class="in" data-k="observation" placeholder="Ce qui a été constaté">${esc(a.observation)}</textarea>
+      <label class="f">Priorité</label><div class="seg prio-seg" data-seg="priority">${PRIOS.map(p => `<button type="button" data-val="${p}" data-p="${p}" class="${a.priority === p ? 'on' : ''}">${PRIO_FR[p]}</button>`).join('')}</div>
+      <label class="f">Photos</label>
+      <label class="btn block">${ic('camera')} Ajouter une photo<input type="file" accept="image/*" capture="environment" class="hidden-input" id="a-photo" multiple></label>
+      <div class="thumbs" id="a-thumbs"></div>
+      ${crit ? '' : `<label class="f">Critère PRT concerné</label><select class="in" data-k="critRef"><option value="">—</option>${THEMES.map(t => `<optgroup label="${esc(t.ref + ' ' + t.name)}">${t.criteria.map(c => `<option value="${c.ref}" ${a.critRef === c.ref ? 'selected' : ''}>${c.ref} ${esc(c.name)}</option>`).join('')}</optgroup>`).join('')}</select>`}
+    </div>
+
+    <div class="section-head"><span>Suivi</span></div>
+    <div class="card">
+      <label class="f" style="margin-top:0">Action corrective demandée</label><textarea class="in" data-k="corrective" placeholder="Ce que le sous-traitant doit faire">${esc(a.corrective)}</textarea>
+      <label class="f">Responsable</label><input class="in" data-k="responsibility" value="${esc(a.responsibility)}">
+      <div class="btns" style="margin-bottom:0">
+        <div><label class="f">Échéance</label><input class="in" type="date" data-k="dueDate" value="${esc(a.dueDate || '')}"></div>
+        <div><label class="f">Sous-traitant</label><select class="in" data-k="subId">${subList.map(s => `<option value="${s.id}" ${s.id === a.subId ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></div>
+      </div>
+    </div>
+
+    <div class="section-head"><span>Emplacement</span><span class="muted small">${a.planId ? esc(plans[a.planId]?.name || '') : ''}</span></div>
+    ${a.planId && plans[a.planId] ? `<div id="a-plan" class="pv plan-box" style="height:38vh"></div>
       <button class="btn block" id="mv" style="margin-top:8px">${a.pin ? 'Déplacer l’épingle' : 'Placer l’épingle'}</button>` : '<div class="muted">Aucun plan lié</div>'}
-    <button class="btn danger block" id="del" style="margin-top:20px">Supprimer l’action</button>
+    <button class="btn danger block" id="del" style="margin-top:20px">${ic('trash')} Supprimer l’action</button>
     <p class="muted small" style="text-align:center">Enregistrement automatique</p>`;
 
   const drawThumbs = async () => { $('#a-thumbs').innerHTML = await thumbsHTML(a.photos); };
@@ -597,7 +678,11 @@ async function vAction(id) {
       a[key] = sb.dataset.val;
       sb.parentElement.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === sb));
       if (key === 'status' && a.status === 'Closed') a.closedAt = todayISO();
-      save.flush(); return;
+      save.flush();
+      const head = view.querySelector('.act-head');
+      head.className = 'card act-head prio-' + a.priority;
+      const due = head.querySelector('.due'); if (due) due.outerHTML = dueChip(a);
+      return;
     }
     const ph = e.target.closest('[data-photo]');
     if (ph) photoViewer(ph.dataset.photo, async () => { a.photos = a.photos.filter(p => p !== ph.dataset.photo); await db.deleteBlob(ph.dataset.photo); save.flush(); drawThumbs(); });
@@ -618,7 +703,7 @@ async function vAction(id) {
 }
 
 // ---------- carte / plan ----------
-let mapSub = '';
+let mapSub = '', mapActions = false;
 async function vMap(q) {
   view.classList.add('full', 'map-page');
   const { subs, subList, plans, planList } = await maps();
@@ -636,17 +721,18 @@ async function vMap(q) {
     </div>
     ${planList.length > 1 ? `<select class="in" id="m-plan" style="margin:0 12px 8px;width:calc(100% - 24px)">${planList.map(p => `<option value="${p.id}" ${p.id === planId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
     <div id="map" class="pv map-fill"></div>
-    <div class="map-legend"><span><b class="lg-i">I</b> Inspection</span><span><b class="lg-a">!</b> Action ouverte</span></div>`;
+    <button class="map-toggle ${mapActions ? 'on' : ''}" id="m-act">${ic('list', 18)}<span>${mapActions ? 'Masquer les actions' : 'Afficher les actions'}</span></button>`;
   const computePins = () => {
     const out = [];
     insps.filter(i => i.planId === planId && i.pin && (!mapSub || i.subId === mapSub) && (!onlyInsp || i.id === onlyInsp))
-      .forEach(i => out.push({ id: 'i:' + i.id, ...i.pin, color: subs[i.subId]?.color, label: 'I' }));
-    acts.filter(a => a.planId === planId && a.pin && a.status !== 'Closed' && (!mapSub || a.subId === mapSub) && (!onlyInsp || a.inspectionId === onlyInsp))
+      .forEach(i => out.push({ id: 'i:' + i.id, ...i.pin, color: subs[i.subId]?.color, label: abbr(subs[i.subId]?.name) }));
+    if (mapActions || onlyInsp) acts.filter(a => a.planId === planId && a.pin && a.status !== 'Closed' && (!mapSub || a.subId === mapSub) && (!onlyInsp || a.inspectionId === onlyInsp))
       .forEach(a => out.push({ id: 'a:' + a.id, ...a.pin, color: subs[a.subId]?.color, label: '!', kind: 'action' }));
     return out;
   };
   const pv = createPlanViewer($('#map'), {
-    imageURL: await db.blobURL(plans[planId].blobId), pins: computePins(), cover: true,
+    imageURL: await db.blobURL(plans[planId].blobId), pins: computePins(), cover: 2.4,
+    focus: onlyInsp ? insps.find(i => i.id === onlyInsp)?.pin : null,
     onPinTap: p => pinSheet(p.id, { subs, insps, acts }),
     onTap: (x, y) => newObservationHere(planId, { x, y }, subList),
   });
@@ -658,17 +744,23 @@ async function vMap(q) {
     pv.setPins(computePins());
   };
   $('#m-plan')?.addEventListener('change', e => { location.hash = '#/map?plan=' + e.target.value; });
+  $('#m-act').onclick = e => {
+    mapActions = !mapActions;
+    const b = e.currentTarget; b.classList.toggle('on', mapActions);
+    b.querySelector('span').textContent = mapActions ? 'Masquer les actions' : 'Afficher les actions';
+    pv.setPins(computePins());
+  };
 }
 function pinSheet(pid, { subs, insps, acts }) {
   const [kind, id] = pid.split(':');
   if (kind === 'i') {
     const i = insps.find(x => x.id === id); const o = overallScore(i.scores, i.bonus, i.penalty);
-    openSheet(`<h3>Inspection ${esc(i.ref)}</h3><div class="row">${subChip(subs[i.subId])}<span class="grow muted">${dateFR(i.date)}</span>${badge(o.pct)}</div>
-      <p>${esc(i.zone || '')}<br><span class="muted small">${esc(i.inspectors || '')}</span></p>
-      <div class="btns"><a class="btn primary" href="#/insp/${i.id}" data-close>Ouvrir</a><button class="btn" data-close>Fermer</button></div>`);
+    openSheet(`<h3>Audit ${esc(subs[i.subId]?.name || '')}</h3><div class="row"><span class="grow muted">${dateFR(i.date)} · ${esc(i.inspectors || '')}</span>${badge(o.pct)}</div>
+      ${i.zone ? `<p>${esc(i.zone)}</p>` : ''}
+      <div class="btns"><a class="btn primary" href="#/insp/${i.id}" data-close>Ouvrir l’audit</a><button class="btn" data-close>Fermer</button></div>`);
   } else {
     const a = acts.find(x => x.id === id);
-    openSheet(`<h3>Action — ${esc(a.priority)}</h3>${actionCard(a, subs)}
+    openSheet(`<h3>Action — priorité ${esc((PRIO_FR[a.priority] || '').toLowerCase())}</h3>${actionCard(a, subs)}
       <div class="btns"><a class="btn primary" href="#/action/${a.id}" data-close>Ouvrir</a><button class="btn" data-close>Fermer</button></div>`);
   }
 }
@@ -688,8 +780,39 @@ function newObservationHere(planId, pin, subList) {
 
 // ---------- sous-traitants ----------
 let showArchived = false;
+// ---------- onglet Audits : par date / par sous-traitant ----------
+let auditSub = '';
+async function vAudits() {
+  setTop({ title: 'Audits' });
+  const [{ subs, subList }, insps] = await Promise.all([maps(), db.all('inspections')]);
+  const active = subList.filter(s => s.name && !s.archived).sort((a, b) => a.name.localeCompare(b.name));
+  const draw = () => {
+    const list = insps.filter(i => !auditSub || i.subId === auditSub).sort((a, b) => (b.date + (b.updatedAt || '')).localeCompare(a.date + (a.updatedAt || '')));
+    const today = todayISO(), week = todayISO(-7), month = todayISO(-31);
+    const groups = [['Aujourd’hui', i => i.date === today], ['Cette semaine', i => i.date < today && i.date >= week], ['Ce mois-ci', i => i.date < week && i.date >= month], ['Plus ancien', i => i.date < month]];
+    $('#alist').innerHTML = groups.map(([label, f]) => {
+      const g = list.filter(f); if (!g.length) return '';
+      return `<div class="section-head"><span>${label}</span><span class="muted small">${g.length}</span></div>${g.map(i => inspCard(i, subs)).join('')}`;
+    }).join('') || '<div class="empty">Aucun audit</div>';
+  };
+  view.innerHTML = `
+    <div class="tabs3 two"><a class="on" href="#/audits">Par date</a><a href="#/subs">Par sous-traitant</a></div>
+    <div class="chips-bar flush">
+      <button data-as="" class="${!auditSub ? 'on' : ''}">Tous</button>
+      ${active.map(s => `<button data-as="${s.id}" class="${auditSub === s.id ? 'on' : ''}" style="--c:${esc(s.color)}"><i></i>${esc(s.name)}</button>`).join('')}
+    </div>
+    <div id="alist"></div>`;
+  draw();
+  view.querySelector('.chips-bar').onclick = e => {
+    const b = e.target.closest('[data-as]'); if (!b) return;
+    auditSub = b.dataset.as;
+    view.querySelectorAll('[data-as]').forEach(x => x.classList.toggle('on', x === b));
+    draw();
+  };
+}
+
 async function vSubs() {
-  setTop({ title: 'Sous-traitants', actions: cloud.isAdmin() ? [{ icon: 'plus', aria: 'Ajouter', onClick: newSub }] : [] });
+  setTop({ title: 'Audits', actions: cloud.isAdmin() ? [{ icon: 'plus', aria: 'Ajouter', onClick: newSub }] : [] });
   const [subs, insps, acts] = await Promise.all([db.all('subs'), db.all('inspections'), db.all('actions')]);
   const rows = subs.filter(s => showArchived || !s.archived).map(s => {
     const last = insps.filter(i => i.subId === s.id).sort((a, b) => b.date.localeCompare(a.date))[0];
@@ -697,6 +820,7 @@ async function vSubs() {
   }).sort((a, b) => (b.pct ?? -1) - (a.pct ?? -1) || a.s.name.localeCompare(b.s.name));
   let rank = 0;
   view.innerHTML = `
+    <div class="tabs3 two"><a href="#/audits">Par date</a><a class="on" href="#/subs">Par sous-traitant</a></div>
     <div class="section-head"><span>Classement — dernier audit</span></div>
     ${rows.map(({ s, pct, open, late }) => `<a class="card link row sub-row" href="#/sub/${s.id}" style="--c:${esc(s.color)};${s.archived ? 'opacity:.5' : ''}">
         <span class="rank">${pct === null ? '–' : ++rank}</span>
@@ -730,6 +854,8 @@ async function newSub() {
 }
 async function vSubEdit(id) {
   if (!cloud.isAdmin()) return vNotFound();
+  // fiche abandonnée sans nom → supprimée en quittant l'écran
+  onCleanup(async () => { const cur = await db.get('subs', id); if (cur && !cur.deleted && !(cur.name || '').trim()) await db.remove('subs', id); });
   const s = await db.get('subs', id);
   if (!s) return vNotFound();
   setTop({ title: s.name || 'Nouveau sous-traitant', back: true });
@@ -762,34 +888,44 @@ async function vSubEdit(id) {
 async function vSub(id) {
   const s = await db.get('subs', id);
   if (!s) return vNotFound();
-  setTop({ title: s.name || 'Sous-traitant', back: '#/subs', actions: cloud.isAdmin() ? [{ icon: 'edit', aria: 'Modifier', onClick: () => location.hash = `#/sub/${id}/edit` }] : [] });
+  setTop({ title: s.name || 'Sous-traitant', sub: 'Historique des audits', back: '#/subs', actions: cloud.isAdmin() ? [{ icon: 'edit', aria: 'Modifier', onClick: () => location.hash = `#/sub/${id}/edit` }] : [] });
   const [insps, acts] = await Promise.all([db.byIndex('inspections', 'subId', id), db.byIndex('actions', 'subId', id)]);
   insps.sort((a, b) => a.date.localeCompare(b.date));
   const pts = insps.map(i => ({ i, pct: overallScore(i.scores, i.bonus, i.penalty).pct }));
   const open = acts.filter(a => a.status !== 'Closed');
+  const late = acts.filter(isLate).length;
+  const last = [...pts].reverse().find(p => p.pct !== null);
   const { subs } = await maps();
   view.innerHTML = `
-    <div class="card row">${s.logoId ? `<img class="logo" id="lg" style="width:60px;height:60px">` : `<span class="dot" style="background:${esc(s.color)};width:40px;height:40px"></span>`}
-      <div class="grow"><b style="font-size:20px">${esc(s.name)}</b>
-      <div>${esc(s.contact || '')}${s.phone ? ` · <a href="tel:${esc(s.phone.replace(/\s/g, ''))}">${esc(s.phone)}</a>` : ''}</div></div></div>
-    <div class="btns"><a class="btn primary" href="#/new?sub=${id}">${ic('plus')} Inspection</a><a class="btn" href="#/actions" id="go-acts">Actions (${open.length})</a></div>
-    <h2>Évolution du score</h2>${lineChart(pts)}
-    <h2>Actions ouvertes (${open.length})</h2>${open.map(a => actionCard(a, subs)).join('') || '<div class="empty">Aucune</div>'}
-    <h2>Inspections (${insps.length})</h2>${[...insps].reverse().map(i => inspCard(i, subs)).join('') || '<div class="empty">Aucune</div>'}`;
+    <div class="card sub-head" style="--c:${esc(s.color)}">
+      ${s.logoId ? `<img class="logo" id="lg" style="width:56px;height:56px">` : `<span class="mono big">${esc(abbr(s.name))}</span>`}
+      <div class="grow"><b>${esc(s.name)}</b>
+        <div class="muted small">${insps.length} audit${insps.length > 1 ? 's' : ''}${s.contact ? ' · ' + esc(s.contact) : ''}${s.phone ? ` · <a href="tel:${esc(s.phone.replace(/\s/g, ''))}">${esc(s.phone)}</a>` : ''}</div></div>
+      ${last ? badge(last.pct) : ''}
+    </div>
+    <div class="kpi-row">
+      <div><b>${last ? Math.round(last.pct * 100) + '%' : '—'}</b><span>Dernier score</span></div>
+      <div><b>${open.length}</b><span>Actions ouvertes</span></div>
+      <div class="${late ? 'late' : ''}"><b>${late}</b><span>En retard</span></div>
+    </div>
+    <a class="btn primary big" href="#/new?sub=${id}" style="margin:6px 0 4px">${ic('plus')} Nouvel audit</a>
+    <div class="section-head"><span>Évolution du score</span></div>${scoreBars(pts)}
+    <div class="section-head"><span>Actions ouvertes</span><span class="muted small">${open.length}</span></div>${open.map(a => actionCard(a, subs)).join('') || '<div class="empty">Aucune action ouverte</div>'}
+    <div class="section-head"><span>Audits</span><span class="muted small">${insps.length}</span></div>${[...insps].reverse().map(i => inspCard(i, subs)).join('') || '<div class="empty">Aucun audit</div>'}`;
   if (s.logoId) $('#lg').src = await db.blobURL(s.logoId);
-  $('#go-acts').onclick = () => { actionFilters.sub = id; actionFilters.view = 'todo'; };
 }
-function lineChart(pts) {
-  const v = pts.filter(p => p.pct !== null);
+/** Score de chaque audit en barres verticales colorées (plus lisible qu'une courbe) */
+function scoreBars(pts) {
+  const v = pts.filter(p => p.pct !== null).slice(-8);
   if (!v.length) return '<div class="empty">Pas encore de score</div>';
-  const w = 340, h = 170, L = 30, R = 10, T = 10, B = 26;
-  const x = i => v.length === 1 ? (L + w - R) / 2 : L + i * (w - L - R) / (v.length - 1);
+  const w = 340, h = 190, L = 30, R = 8, T = 18, B = 24, bw = Math.min(34, (w - L - R) / v.length - 10);
   const y = p => T + (1 - p) * (h - T - B);
-  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;background:var(--surface);border-radius:14px;border:2px solid var(--line)">
-    ${[0.5, 0.7, 0.8, 0.9, 1].map(t => `<line x1="${L}" x2="${w - R}" y1="${y(t)}" y2="${y(t)}" stroke="${rating(t).color}" stroke-opacity=".5" stroke-dasharray="3 3"/><text x="2" y="${y(t) + 3}" font-size="9">${t * 100}%</text>`).join('')}
-    <polyline fill="none" stroke="var(--brand-2)" stroke-width="2.5" points="${v.map((p, i) => `${x(i)},${y(p.pct)}`).join(' ')}"/>
-    ${v.map((p, i) => `<circle cx="${x(i)}" cy="${y(p.pct)}" r="5.5" fill="${rating(p.pct).color}" stroke="#fff" stroke-width="1.5"/>
-      <text x="${x(i)}" y="${h - 8}" font-size="8.5" text-anchor="middle">${p.i.date.slice(5).split('-').reverse().join('/')}</text>`).join('')}
+  const x = i => L + (i + 0.5) * (w - L - R) / v.length;
+  return `<svg viewBox="0 0 ${w} ${h}" class="chart-box" role="img" aria-label="Évolution du score">
+    ${[0, 0.5, 0.7, 0.8, 0.9, 1].map(t => `<line x1="${L}" x2="${w - R}" y1="${y(t)}" y2="${y(t)}" stroke="var(--line)" ${t ? 'stroke-dasharray="3 3"' : ''}/><text x="${L - 4}" y="${y(t) + 3}" font-size="9" text-anchor="end" opacity=".7">${t * 100}</text>`).join('')}
+    ${v.map((p, i) => `<rect x="${x(i) - bw / 2}" y="${y(p.pct)}" width="${bw}" height="${y(0) - y(p.pct)}" rx="4" fill="${rating(p.pct).color}"/>
+      <text x="${x(i)}" y="${y(p.pct) - 4}" font-size="10.5" font-weight="700" text-anchor="middle">${Math.round(p.pct * 100)}%</text>
+      <text x="${x(i)}" y="${h - 8}" font-size="9" text-anchor="middle" opacity=".8">${p.i.date.slice(5).split('-').reverse().join('/')}</text>`).join('')}
   </svg>`;
 }
 
@@ -862,6 +998,8 @@ async function vSettings() {
     <button class="btn block" id="scale" style="margin-bottom:10px">Barème de notation (Notes)</button>
     <h2>Exports</h2>
     <button class="btn block primary" id="x-all" style="margin-bottom:10px">Excel — toutes les inspections</button>
+    <h2>Données</h2>
+    <button class="btn block danger" id="reset" style="margin-bottom:10px">${ic('trash')} Effacer tous les audits</button>
     <h2>Sauvegarde</h2>
     <button class="btn block" id="bk" style="margin-bottom:10px">${ic('download')} Sauvegarde complète (JSON)</button>
     ${cloud.enabled ? '' : `<label class="btn block danger">${ic('upload')} Restaurer une sauvegarde<input type="file" accept="application/json,.json" class="hidden-input" id="rs"></label>`}
@@ -879,6 +1017,15 @@ async function vSettings() {
   view.addEventListener('input', e => { const k = e.target.dataset.s; if (k) { st[k] = e.target.value; save(); } });
   $('#theme').onclick = e => { const b = e.target.closest('[data-val]'); if (!b) return; st.theme = b.dataset.val; save.flush(); applyTheme(st.theme); render(); };
   $('#scale').onclick = showScale;
+  $('#reset').onclick = async () => {
+    const insps = await db.all('inspections');
+    if (!insps.length) return toast('Aucun audit à effacer');
+    if (!await confirmBox(`Effacer les ${insps.length} audit${insps.length > 1 ? 's' : ''} ?`, 'Tous les audits, actions et photos de ce téléphone seront supprimés. Les sous-traitants et le plan sont conservés.', 'Tout effacer')) return;
+    if (!await confirmBox('Vraiment tout effacer ?', 'Cette opération est définitive.', 'Oui, tout effacer')) return;
+    for (const i of insps) await deleteInspection(i.id);
+    for (const a of await db.all('actions')) await db.remove('actions', a.id);
+    toast('Tous les audits ont été effacés'); location.hash = '#/';
+  };
   $('#x-all').onclick = async () => { const all = (await db.all('inspections')).sort((a, b) => a.date.localeCompare(b.date)); if (!all.length) return toast('Aucune inspection'); exportSheet(all, { allActions: true }); };
   $('#bk').onclick = async () => {
     toast('Préparation de la sauvegarde…');
@@ -957,6 +1104,8 @@ function vNotFound() { setTop({ title: 'Introuvable', back: '#/' }); view.innerH
 const routes = [
   [/^\/?$/, vHome, 'home'],
   [/^\/new$/, vNew, 'home'],
+  [/^\/start\/([^/]+)$/, vStart, 'home'],
+  [/^\/audits$/, vAudits, 'audits'],
   [/^\/insp\/([^/]+)$/, vInsp, 'home'],
   [/^\/insp\/([^/]+)\/edit$/, vInspEdit, 'home'],
   [/^\/insp\/([^/]+)\/sum$/, vSummary, 'home'],
@@ -964,9 +1113,9 @@ const routes = [
   [/^\/actions$/, vActions, 'actions'],
   [/^\/action\/([^/]+)$/, vAction, 'actions'],
   [/^\/map$/, vMap, 'map'],
-  [/^\/subs$/, vSubs, 'subs'],
-  [/^\/sub\/([^/]+)$/, vSub, 'subs'],
-  [/^\/sub\/([^/]+)\/edit$/, vSubEdit, 'subs'],
+  [/^\/subs$/, vSubs, 'audits'],
+  [/^\/sub\/([^/]+)$/, vSub, 'audits'],
+  [/^\/sub\/([^/]+)\/edit$/, vSubEdit, 'audits'],
   [/^\/plans$/, vPlans, 'home'],
   [/^\/settings$/, vSettings, 'home'],
   [/^\/team$/, vTeam, 'home'],
@@ -979,6 +1128,7 @@ async function render() {
   document.querySelectorAll('.sheet-bg').forEach(s => s.remove());
   // nouveau nœud pour supprimer les écouteurs de l'écran précédent
   const fresh = view.cloneNode(false); view.replaceWith(fresh); view = fresh;
+  fresh.className = ''; // chaque écran repart d'une mise en page neutre (sinon le mode « plan » restait actif)
   const [path, qs] = (location.hash.slice(1) || '/').split('?');
   const q = new URLSearchParams(qs || '');
   for (const [re, fn, tab] of routes) {
@@ -1027,8 +1177,23 @@ async function migrateSeedIds() {
   await db.setMeta('ids-v3', true);
 }
 
+/** Couleurs distinctes pour les sous-traitants de départ + nettoyage des fiches vides */
+async function fixSubs() {
+  if (await db.getMeta('subs-v4')) return;
+  for (const s of await db.all('subs')) {
+    const seedSub = SEED_SUBS.find(x => x.name.toLowerCase() === (s.name || '').toLowerCase());
+    if (seedSub && s.color !== seedSub.color) await db.put('subs', { ...s, color: seedSub.color });
+    if (!(s.name || '').trim()) {
+      const used = (await db.byIndex('inspections', 'subId', s.id)).length + (await db.byIndex('actions', 'subId', s.id)).length;
+      if (!used) await db.remove('subs', s.id);
+    }
+  }
+  await db.setMeta('subs-v4', true);
+}
+
 async function seed() {
   await migrateSeedIds();
+  await fixSubs();
   if (await db.getMeta('seeded-v3')) return;
   const existing = await db.all('subs', { includeDeleted: true });
   for (const s of SEED_SUBS) {
