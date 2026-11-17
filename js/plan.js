@@ -18,7 +18,15 @@ export function createPlanViewer(container, opts) {
   const layer = container.querySelector('.pv-pins');
   let W = 1, H = 1, s = 1, tx = 0, ty = 0, minS = 0.05;
 
+  // le plan ne peut jamais quitter le cadre : plus grand que le cadre, il le couvre toujours ; plus petit, il reste entièrement visible
+  const clampView = () => {
+    if (W <= 1) return;
+    const r = container.getBoundingClientRect(), w = W * s, h = H * s, pad = 24;
+    tx = w >= r.width ? Math.min(pad, Math.max(r.width - w - pad, tx)) : Math.min(r.width - w + pad, Math.max(-pad, tx));
+    ty = h >= r.height ? Math.min(pad, Math.max(r.height - h - pad, ty)) : Math.min(r.height - h + pad, Math.max(-pad, ty));
+  };
   const apply = () => {
+    clampView();
     stage.style.transform = `translate(${tx}px,${ty}px) scale(${s})`;
     stage.style.setProperty('--inv', 1 / s);
   };
@@ -61,7 +69,7 @@ export function createPlanViewer(container, opts) {
   // --- gestes ---
   const pts = new Map();
   let holdTimer = null, dragPin = null;
-  let start = null, last = null, multi = false;
+  let start = null, last = null, multi = false, panning = false;
   const rel = e => { const r = container.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
 
   container.addEventListener('pointerdown', e => {
@@ -69,14 +77,14 @@ export function createPlanViewer(container, opts) {
     container.setPointerCapture?.(e.pointerId);
     pts.set(e.pointerId, rel(e));
     if (pts.size === 1) {
-      start = { ...rel(e), t: Date.now(), target: e.target }; multi = false;
+      start = { ...rel(e), t: Date.now(), target: e.target }; multi = false; panning = false;
       const pinEl = e.target.closest?.('.pin');
       if (pinEl && onPinMove) {
         clearTimeout(holdTimer);
         holdTimer = setTimeout(() => { dragPin = { el: pinEl, pin: pins.find(q => q.id === pinEl.dataset.pid) }; pinEl.classList.add('pin-drag'); navigator.vibrate?.(25); }, 350);
       }
     }
-    if (pts.size === 2) { multi = true; clearTimeout(holdTimer); }
+    if (pts.size === 2) { multi = true; panning = true; clearTimeout(holdTimer); }
     last = [...pts.values()].map(p => ({ ...p }));
   });
   container.addEventListener('pointermove', e => {
@@ -88,6 +96,9 @@ export function createPlanViewer(container, opts) {
       last = cur.map(p => ({ ...p })); return;
     }
     if (start && Math.hypot(cur[0].x - start.x, cur[0].y - start.y) > 8) clearTimeout(holdTimer);
+    // un toucher qui bouge à peine reste un toucher : le plan ne bouge pas
+    if (cur.length === 1 && start && !multi && !panning && Math.hypot(cur[0].x - start.x, cur[0].y - start.y) < 14) return;
+    if (cur.length === 1) panning = true;
     if (cur.length === 1 && last.length === 1) {
       tx += cur[0].x - last[0].x; ty += cur[0].y - last[0].y; apply();
     } else if (cur.length === 2 && last.length === 2) {
@@ -112,7 +123,7 @@ export function createPlanViewer(container, opts) {
     last = [...pts.values()].map(q => ({ ...q }));
     if (pts.size === 0 && start && !multi) {
       const moved = Math.hypot(p.x - start.x, p.y - start.y);
-      if (moved < 10 && Date.now() - start.t < 600) {
+      if (!panning && moved < 14 && Date.now() - start.t < 700) {
         const pinEl = start.target.closest?.('.pin');
         if (pinEl && onPinTap) { onPinTap(pins.find(q => q.id === pinEl.dataset.pid)); }
         else if (onTap) {
@@ -131,7 +142,11 @@ export function createPlanViewer(container, opts) {
     const r = container.getBoundingClientRect();
     if (z === 'fit') fit(); else zoomAt(z === 'in' ? 1.6 : 1 / 1.6, r.width / 2, r.height / 2);
   });
-  const ro = new ResizeObserver(() => { if (W > 1) fit(opts.cover); });
+  let lastW = 0;
+  const ro = new ResizeObserver(() => {
+    const w = Math.round(container.getBoundingClientRect().width);
+    if (W > 1 && Math.abs(w - lastW) > 2) { lastW = w; fit(opts.cover); } else { lastW = w; clampView(); apply(); }
+  });
   ro.observe(container);
 
   return {

@@ -7,10 +7,10 @@ import { compressImage, planFileToBlob, pdfPageCount } from './images.js';
 import { ic } from './icons.js';
 import * as cloud from './cloud.js';
 import { SEED_SUBS, SEED_LOCATIONS, SEED_PLAN, SEED_SITE } from './seed.js';
-import { CRIT_FR } from './report-fr.js';
+import { CRIT_FR, TXT as RTXT } from './report-fr.js';
 import { REPORT_DEFAULTS, REPORT_TITLES, buildXLSX, buildPDF, shareFile, download, canShareFile, actionRef } from './export.js';
 
-export const APP_VERSION = '3.5.0';
+export const APP_VERSION = '3.6.0';
 
 // ---------- utilitaires ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -226,21 +226,73 @@ async function vHome() {
   const recent = [...insps].sort((a, b) => (b.date + b.updatedAt).localeCompare(a.date + a.updatedAt)).slice(0, 6);
   const late = acts.filter(isLate).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
   const today = new Date().toLocaleDateString('fr-BE', { weekday: 'long', day: 'numeric', month: 'long' });
+  // bandeau de tête (écran large) : projet, photo du chantier, chiffres clés
+  const since = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
+  const month = insps.filter(i => i.date >= since);
+  const pcts = month.map(i => overallScore(i.scores, i.bonus, i.penalty).pct).filter(x => x !== null);
+  const avgPct = pcts.length ? pcts.reduce((a, b) => a + b, 0) / pcts.length : null;
+  const openActs = acts.filter(a => a.status !== 'Closed').length;
   view.innerHTML = `
     ${cloud.enabled ? '<button class="sync-pill" id="sync-now" hidden></button>' : ''}
+    <section class="home-hero">
+      <div class="hero-id">
+        <img class="hero-logo" id="hero-logo" src="icons/icon-192.png" alt="">
+        <div><span class="hero-kicker">${esc(today)}</span><h2>${esc(PROJECT?.name || 'Inspections HSE')}</h2><span class="hero-site">${esc([PROJECT?.site, 'Inspections HSE des entreprises'].filter(Boolean).join(' · '))}</span></div>
+      </div>
+      <div class="hero-kpis">
+        <a href="#/audits"><b>${month.length}</b><span>audits · 30 jours</span></a>
+        <a href="#/stats"><b style="color:${avgPct === null ? '#fff' : rating(avgPct).color}">${avgPct === null ? '—' : Math.round(avgPct * 100) + ' %'}</b><span>score moyen</span></a>
+        <a href="#/actions"><b>${openActs}</b><span>actions ouvertes</span></a>
+        <a href="#/actions?late=1" class="${late.length ? 'warn' : ''}"><b>${late.length}</b><span>en retard</span></a>
+      </div>
+      ${cloud.can('audit') ? `<a class="hero-cta" href="#/start">${ic('plus')} Nouvel audit</a>` : ''}
+    </section>
     ${cloud.can('audit') ? `<a class="btn primary big new-audit" href="#/start">${ic('plus')}<span>Nouvel audit<small>zone, une ou plusieurs entreprises</small></span></a>` : ''}
+    <div class="home-cols"><div class="home-main">
     <div class="section-head"><span>Audit rapide · 1 entreprise</span><span class="muted small" style="text-transform:capitalize">${esc(today)}</span></div>
-    ${cloud.can('audit') ? subGrid(subList, insps, acts) : '<div class="card muted">Votre accès ne permet pas de lancer des audits. Contactez l’administrateur HSE.</div>'}
+    ${cloud.can('audit') ? (subList.some(s => !s.archived) ? subGrid(subList, insps, acts) : noCompanyCard()) : '<div class="card muted">Votre accès ne permet pas de lancer des audits. Contactez l’administrateur HSE.</div>'}
+    </div><div class="home-side">
     ${late.length ? `<div class="section-head late"><span class="row" style="gap:6px">${ic('alert', 18)} Actions en retard</span><span>${late.length}</span></div>
       ${late.slice(0, 5).map(a => actionCard(a, subs)).join('')}
       ${late.length > 5 ? `<a class="btn block" href="#/actions?late=1">Voir les ${late.length} actions</a>` : ''}` : ''}
     <div class="section-head"><span>${cloud.enabled && cloud.isAdmin() ? 'Audits de l’équipe' : cloud.enabled ? 'Mes audits' : 'Inspections récentes'}</span>${insps.length ? `<span class="muted small">${insps.length} au total</span>` : ''}</div>
-    ${recent.map(i => inspCard(i, subs)).join('') || '<div class="empty">Aucune inspection pour l’instant.<br>Touchez une entreprise pour commencer.</div>'}`;
+    ${inspList(recent, subs) || '<div class="empty">Aucune inspection pour l’instant.<br>Touchez une entreprise pour commencer.</div>'}
+    </div></div>`;
+  // photo du chantier (plan) en fond du bandeau, logo du projet s'il existe
+  (async () => {
+    const plan = (await maps()).planList[0];
+    const hero = view.querySelector('.home-hero');
+    if (plan?.blobId && hero) hero.style.setProperty('--hero-img', `url("${await db.blobURL(plan.blobId)}")`);
+    if (PROJECT?.logoId) { const u = await db.blobURL(PROJECT.logoId); if (u) $('#hero-logo').src = u; }
+  })();
   bindSubGrid();
+  $('#pick-comp')?.addEventListener('click', pickProjectCompanies);
   drawSync();
   $('#sync-now')?.addEventListener('click', () => cloud.sync());
 }
 
+/** Projet encore sans entreprise : on explique et on propose de les choisir tout de suite */
+function noCompanyCard() {
+  return `<div class="card empty-proj"><b>Aucune entreprise dans ${esc(PROJECT?.name || 'ce projet')}</b>
+    <p class="muted small">${cloud.isAdmin() ? 'Choisissez dans l’annuaire les entreprises qui travaillent sur ce projet.' : 'L’administrateur HSE doit d’abord ajouter les entreprises de ce projet.'}</p>
+    ${cloud.isAdmin() ? `<button class="btn primary block" id="pick-comp">${ic('plus')} Ajouter des entreprises</button>` : ''}</div>`;
+}
+async function pickProjectCompanies() {
+  const { allSubs } = await maps();
+  const chosen = new Set(PROJECT.companyIds || []);
+  const list = allSubs.filter(s => !s.archived).sort((a, b) => a.name.localeCompare(b.name));
+  openSheet(`<h3>Entreprises de ${esc(PROJECT.name)}</h3>
+    ${list.length ? `<div class="check-grid">${list.map(s => `<label class="check-item" style="--c:${esc(s.color)}"><input type="checkbox" data-comp="${s.id}" ${chosen.has(s.id) ? 'checked' : ''}><span class="mono">${esc(abbr(s.name))}</span><b>${esc(s.name)}</b></label>`).join('')}</div>` : '<p class="muted">L’annuaire est vide.</p>'}
+    <div class="btns" style="margin-top:12px"><button class="btn" id="pc-new">${ic('plus')} Nouvelle entreprise</button><button class="btn primary" id="pc-ok">Valider</button></div>`,
+  (el, close) => {
+    el.addEventListener('change', e => { const c = e.target.dataset.comp; if (c) e.target.checked ? chosen.add(c) : chosen.delete(c); });
+    el.querySelector('#pc-new').onclick = () => { close(); newSub(); };
+    el.querySelector('#pc-ok').onclick = async () => {
+      const p = await db.get('projects', PROJECT.id); p.companyIds = [...chosen]; await db.put('projects', p);
+      close(); toast(`${chosen.size} entreprise${chosen.size > 1 ? 's' : ''} dans ${p.name}`); render();
+    };
+  });
+}
 function subGrid(subList, insps = [], acts = []) {
   const active = subList.filter(s => !s.archived).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
   const today = todayISO();
@@ -375,6 +427,26 @@ function inspCard(i, subs) {
     </div>
     ${o.pct === null ? '<span class="badge none">—</span>' : badge(o.pct)}</a>`;
 }
+/** Liste d'audits : ceux d'une même tournée (lancés ensemble) sont regroupés dans un seul bloc */
+function inspList(list, subs) {
+  const byVisit = {};
+  list.forEach(i => { if (i.visitId) (byVisit[i.visitId] ||= []).push(i); });
+  const done = new Set();
+  return list.map(i => {
+    const grp = i.visitId && byVisit[i.visitId].length > 1 ? byVisit[i.visitId] : null;
+    if (!grp) return inspCard(i, subs);
+    if (done.has(i.visitId)) return '';
+    done.add(i.visitId);
+    const zone = grp.find(x => x.zone)?.zone;
+    const rows = [...grp].sort((a, b) => auditLabel(a, subs).localeCompare(auditLabel(b, subs))).map(x => {
+      const o = overallScore(x.scores, x.bonus, x.penalty), n = o.themes.reduce((a, t) => a + t.done, 0);
+      return `<a class="vg-row" href="#/insp/${x.id}" style="--c:${esc(auditColor(x, subs))}"><span class="mono">${esc(auditAbbr(x, subs))}</span>
+        <span class="grow"><b>${esc(auditLabel(x, subs))}</b><small>${n}/124 critères</small></span>${o.pct === null ? '<span class="badge none">—</span>' : badge(o.pct)}</a>`;
+    }).join('');
+    return `<div class="card visit-group">
+      <div class="vg-head">${ic('pin', 16)}<span class="grow"><b>Tournée · ${grp.length} entreprises</b><small>${dateFR(i.date)}${zone ? ' · ' + esc(zone) : ''}</small></span></div>${rows}</div>`;
+  }).join('');
+}
 const daysTo = d => Math.round((new Date(d + 'T12:00:00') - new Date(todayISO() + 'T12:00:00')) / 864e5);
 function dueChip(a) {
   if (a.status === 'Closed') return `<span class="due ok">${ic('check', 15)} Clôturée</span>`;
@@ -407,7 +479,7 @@ async function inspForm(state, { live }) {
     ${planList.length > 1 ? `<label class="f">Plan</label><select class="in" id="f-plan">${planList.map(p => `<option value="${p.id}" ${p.id === state.planId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
     <label class="f">Inspecteur(s)</label><input class="in" id="f-insp" value="${esc(state.inspectors || '')}" autocomplete="name">
     <div class="btns" style="margin:0"><div><label class="f">Date</label><input class="in" type="date" id="f-date" value="${esc(state.date)}"></div>
-    <div><label class="f">Projet / Site</label><input class="in" id="f-site" value="${esc(state.site || '')}"></div></div>
+    <div><label class="f">Projet / chantier</label><input class="in" id="f-site" value="${esc(state.site || '')}"></div></div>
     <div id="form-foot" style="margin-top:16px"></div>`;
   view.querySelectorAll('[data-logo]').forEach(async im => { im.src = await db.blobURL(im.dataset.logo); });
 
@@ -420,7 +492,7 @@ async function inspForm(state, { live }) {
     const sub = state.subIds.length === 1 ? subList.find(s => s.id === state.subIds[0]) : null;
     pv = createPlanViewer(box, {
       imageURL: await db.blobURL(plan.blobId),
-      pins: state.pin ? [{ id: 'p', ...state.pin, color: sub?.color, label: '', ghost: true }] : [],
+      pins: state.pin ? [{ id: 'p', ...state.pin, color: sub?.color, label: '', ghost: true }] : [], cover: 2.4,
       focus: state.pin || null,
       onTap: (x, y) => { state.pin = { x, y }; pv.setPins([{ id: 'p', x, y, color: sub?.color || '#0B2D5B', label: '', ghost: true }]); live?.('pin'); },
     });
@@ -599,7 +671,7 @@ async function vTheme(id, ref) {
         <h3><small>${c.ref}</small>${esc(c.name)}</h3>
         ${prevNote(c)}
         <div class="scores">${[0, 1, 2, 3, 4, 5, NA].map(v => `<button type="button" data-v="${v}" class="${v === NA ? 'na' : ''} ${s.v === v ? 'on' : ''}">${v === NA ? 'N/A' : v}</button>`).join('')}</div>
-        <textarea class="in" style="margin-top:8px;min-height:60px" placeholder="Evidence / Comments" data-c>${esc(s.c || '')}</textarea>
+        <textarea class="in" style="margin-top:8px;min-height:60px" placeholder="Constat / commentaire" data-c>${esc(s.c || '')}</textarea>
         <div class="crit-tools">
           <label class="btn" style="margin:0">${ic('camera')} Photo<input type="file" accept="image/*" capture="environment" class="hidden-input" data-photo-in multiple></label>
           ${cloud.can('actions') ? `<button class="btn" data-act>${ic('plus')} Action${n ? ` (${n})` : ''}</button>` : '<span></span>'}</div>
@@ -695,22 +767,22 @@ async function vSummary(id) {
     ${cloud.can('export') ? `<button class="btn primary block" id="exp" style="margin:12px 0">${ic('share')} Exporter (Excel / PDF)</button>` : ''}
     <div class="section-head"><span>Informations</span></div>
     <div class="card">
-      <div class="ref-line"><span class="muted small">Inspection Reference</span><b>${esc(insp.ref)}</b></div>
-      <label class="f">Project / Site</label><input class="in" data-k="site" value="${esc(insp.site || '')}">
-      <label class="f">Inspection Date</label><input class="in" type="date" data-k="date" value="${esc(insp.date)}">
-      <label class="f">Inspector(s)</label><input class="in" data-k="inspectors" value="${esc(insp.inspectors || '')}">
-      <div class="btns" style="margin-bottom:0"><div><label class="f">BE SAFE Bonus</label><input class="in" type="number" inputmode="decimal" step="0.5" data-k="bonus" value="${Number(insp.bonus) || 0}"></div>
-      <div><label class="f">LSR Penalty</label><input class="in" type="number" inputmode="decimal" step="0.5" data-k="penalty" value="${Number(insp.penalty) || 0}"></div></div>
+      <div class="ref-line"><span class="muted small">Référence</span><b>${esc(insp.ref)}</b></div>
+      <label class="f">Projet / chantier</label><input class="in" data-k="site" value="${esc(insp.site || '')}">
+      <label class="f">Date de l’audit</label><input class="in" type="date" data-k="date" value="${esc(insp.date)}">
+      <label class="f">Inspecteur(s)</label><input class="in" data-k="inspectors" value="${esc(insp.inspectors || '')}">
+      <div class="btns" style="margin-bottom:0"><div><label class="f">Bonus BE SAFE</label><input class="in" type="number" inputmode="decimal" step="0.5" data-k="bonus" value="${Number(insp.bonus) || 0}"></div>
+      <div><label class="f">Pénalité LSR</label><input class="in" type="number" inputmode="decimal" step="0.5" data-k="penalty" value="${Number(insp.penalty) || 0}"></div></div>
     </div>`;
   const draw = () => {
     const o = overallScore(insp.scores, insp.bonus, insp.penalty);
     $('#sum-out').innerHTML = `
-      <div class="overall" style="background:${o.rating.color};color:${o.rating.fg}"><div>Overall Site Score</div><b>${fmtPct(o.pct)}</b><span>${o.pct === null ? 'Pas encore noté' : o.rating.name}</span>
+      <div class="overall" style="background:${o.rating.color};color:${o.rating.fg}"><div>Score global</div><b>${fmtPct(o.pct)}</b><span>${o.pct === null ? 'Pas encore noté' : o.rating.name}</span>
         <div class="small">${o.countedThemes}/19 thèmes notés</div></div>
       ${barChart(o.themes)}
       <table class="t" style="margin-top:12px"><tr><th>Theme</th><th class="r">Score %</th><th>Rating</th></tr>
       ${o.themes.map(t => `<tr><td><a href="#/insp/${id}/t/${t.theme.ref}">${t.theme.ref} ${esc(t.theme.name)}</a></td><td class="r">${fmtPct(t.pct)}</td><td>${ratingChip(t.pct)}</td></tr>`).join('')}
-      <tr><th>Overall Site Score</th><th class="r">${fmtPct(o.pct)}</th><th>${ratingChip(o.pct)}</th></tr></table>`;
+      <tr><th>Score global</th><th class="r">${fmtPct(o.pct)}</th><th>${ratingChip(o.pct)}</th></tr></table>`;
   };
   draw();
   view.addEventListener('input', e => {
@@ -831,7 +903,15 @@ async function vActions(q) {
 function enableBoardDrag(board, onDrop) {
   let timer = null, drag = null, start = null, scrollTimer = null;
   const colAt = (x, y) => document.elementFromPoint(x, y)?.closest('.kcol');
+  // retire toute carte fantôme restante et force Safari à redessiner l'en-tête (sinon une trace peut rester affichée)
+  const sweep = () => {
+    document.querySelectorAll('.kghost').forEach(g => g.remove());
+    board.querySelectorAll('.kdragging, .kover').forEach(c => c.classList.remove('kdragging', 'kover'));
+    const tb = document.getElementById('topbar'); if (tb) { tb.style.transform = 'translateZ(0)'; requestAnimationFrame(() => { tb.style.transform = ''; }); }
+  };
   const begin = (card, x, y) => {
+    if (drag) return;
+    sweep();
     const r = card.getBoundingClientRect();
     const ghost = card.cloneNode(true);
     ghost.className = 'kcard kghost ' + [...card.classList].filter(c => c.startsWith('prio-')).join(' ');
@@ -854,9 +934,7 @@ function enableBoardDrag(board, onDrop) {
     clearInterval(scrollTimer);
     drag.ghost.style.display = 'none';
     const col = colAt(x, y);
-    drag.ghost.remove(); drag.card.classList.remove('kdragging');
-    board.querySelectorAll('.kcol').forEach(c => c.classList.remove('kover'));
-    const id = drag.card.dataset.id; drag = null;
+    const id = drag.card.dataset.id; drag = null; sweep();
     if (col && col.dataset.st) onDrop(id, col.dataset.st);
   };
   const cancel = () => { clearTimeout(timer); timer = null; };
@@ -872,7 +950,11 @@ function enableBoardDrag(board, onDrop) {
     if (timer && Math.hypot(t.clientX - start.x, t.clientY - start.y) > 8) cancel(); // c'est un défilement
   }, { passive: false });
   board.addEventListener('touchend', e => { cancel(); if (drag) { e.preventDefault(); const t = e.changedTouches[0]; end(t.clientX, t.clientY); } });
-  board.addEventListener('touchcancel', () => { cancel(); if (drag) { drag.ghost.remove(); drag.card.classList.remove('kdragging'); drag = null; } });
+  board.addEventListener('touchcancel', () => { cancel(); clearInterval(scrollTimer); drag = null; sweep(); });
+  // l'app passe en arrière-plan ou le doigt se lève hors du tableau : on nettoie
+  const lost = () => { cancel(); clearInterval(scrollTimer); if (drag) { drag = null; sweep(); } };
+  window.addEventListener('pagehide', lost); document.addEventListener('visibilitychange', lost);
+  onCleanup(() => { lost(); window.removeEventListener('pagehide', lost); document.removeEventListener('visibilitychange', lost); });
   board.addEventListener('contextmenu', e => { if (e.target.closest('.kcard')) e.preventDefault(); });
   // --- souris (ordinateur)
   board.addEventListener('mousedown', e => {
@@ -1122,7 +1204,7 @@ async function vAudits() {
     const groups = [['Aujourd’hui', i => i.date === today], ['Cette semaine', i => i.date < today && i.date >= week], ['Ce mois-ci', i => i.date < week && i.date >= month], ['Plus ancien', i => i.date < month]];
     $('#alist').innerHTML = groups.map(([label, f]) => {
       const g = list.filter(f); if (!g.length) return '';
-      return `<div class="section-head"><span>${label}</span><span class="muted small">${g.length}</span></div>${g.map(i => inspCard(i, subs)).join('')}`;
+      return `<div class="section-head"><span>${label}</span><span class="muted small">${g.length}</span></div>${inspList(g, subs)}`;
     }).join('') || '<div class="empty">Aucun audit</div>';
   };
   view.innerHTML = `
@@ -1636,11 +1718,15 @@ async function vMember(id) {
 const statsF = { period: 30, scope: 'project' };
 async function vStats() {
   if (!cloud.isAdmin()) return vNotFound();
-  setTop({ title: 'Pilotage', sub: statsF.scope === 'project' ? (PROJECT?.name || '') : 'Tous les projets' });
   const [allInsps, allActs, { subs }, projects] = await Promise.all([db.all('inspections'), db.all('actions'), maps(), db.all('projects')]);
+  // périmètre : un projet au choix, ou tous
+  const pList = projects.filter(p => !p.archived).sort((a, b) => a.name.localeCompare(b.name));
+  if (statsF.scope === 'project' || (statsF.scope !== 'all' && !pList.some(p => p.id === statsF.scope))) statsF.scope = PROJECT?.id || 'all';
+  const scopeName = statsF.scope === 'all' ? 'Tous les projets' : (pList.find(p => p.id === statsF.scope)?.name || '');
+  setTop({ title: 'Pilotage', sub: scopeName });
   const names = cloud.enabled ? await cloud.names() : {};
   const since = statsF.period ? todayISO(-statsF.period) : '0000';
-  const scope = r => statsF.scope === 'all' || inProject(r);
+  const scope = r => statsF.scope === 'all' || pid(r) === statsF.scope;
   const insps = allInsps.filter(i => scope(i) && i.date >= since);
   const acts = allActs.filter(a => scope(a) && !a.deleted);
   const pctOf = i => overallScore(i.scores, i.bonus, i.penalty).pct;
@@ -1662,7 +1748,7 @@ async function vStats() {
 
   view.innerHTML = `
     <div class="tabs3 four">${[[7, '7 j'], [30, '30 j'], [90, '3 mois'], [0, 'Tout']].map(([v, l]) => `<button data-per="${v}" class="${statsF.period === v ? 'on' : ''}">${l}</button>`).join('')}</div>
-    <div class="tabs3 two">${[['project', PROJECT?.name || 'Ce projet'], ['all', 'Tous les projets']].map(([v, l]) => `<button data-scope="${v}" class="${statsF.scope === v ? 'on' : ''}">${esc(l)}</button>`).join('')}</div>
+    ${pList.length > 1 ? `<div class="chips-bar flush scope-bar"><button data-scope="all" class="${statsF.scope === 'all' ? 'on' : ''}">Tous les projets</button>${pList.map(p => `<button data-scope="${p.id}" class="${statsF.scope === p.id ? 'on' : ''}" style="--c:${esc(p.color || '#1A56A8')}"><i></i>${esc(p.name)}</button>`).join('')}</div>` : ''}
     <div class="kpi-grid">
       <div><b>${insps.length}</b><span>Audits</span></div>
       <div><b style="color:${rating(avg(insps)).color === '#9E9E9E' ? 'inherit' : rating(avg(insps)).color}">${avg(insps) === null ? '—' : Math.round(avg(insps) * 100) + '%'}</b><span>Score moyen</span></div>
@@ -1700,7 +1786,7 @@ async function vStats() {
   $('#st-x').onclick = () => {
     const XLSX = window.XLSX, wb = XLSX.utils.book_new();
     const period = statsF.period ? `${statsF.period} derniers jours` : 'toute la période';
-    const head = [['PRT HSE — Pilotage'], [`Périmètre : ${statsF.scope === 'project' ? PROJECT?.name : 'tous les projets'} · ${period} · édité le ${dateFR(todayISO())}`], []];
+    const head = [['PRT HSE — Pilotage'], [`Périmètre : ${scopeName} · ${period} · édité le ${dateFR(todayISO())}`], []];
     const sh1 = XLSX.utils.aoa_to_sheet([...head, ['HSE', 'Audits', 'Score moyen'], ...byHse.map(x => [x.n, x.l.length, x.avg === null ? '' : Math.round(x.avg * 1000) / 10 + ' %'])]);
     const sh2 = XLSX.utils.aoa_to_sheet([...head, ['Entreprise', 'Type', 'Audits', 'Score moyen', 'Actions ouvertes'], ...bySub.map(x => [x.s?.name, typeOf(x.s).label, x.l.length, x.avg === null ? '' : Math.round(x.avg * 1000) / 10 + ' %', x.open])]);
     const sh3 = XLSX.utils.aoa_to_sheet([...head, ['Date', 'Projet', 'Entreprise', 'HSE', 'Référence', 'Score'], ...insps.sort((a, b) => a.date.localeCompare(b.date)).map(i => [dateFR(i.date), projects.find(p => p.id === pid(i))?.name || '', auditLabel(i, subs), who(i), i.ref, pctOf(i) === null ? '' : Math.round(pctOf(i) * 1000) / 10 + ' %'])]);
@@ -1728,12 +1814,17 @@ async function vReport(id) {
   const R = insp.report;
   // nouvelle langue par défaut = la dernière utilisée
   if (fresh0 && lastLang && lastLang !== R.lang) { if (R.title === REPORT_TITLES[R.lang]) R.title = REPORT_TITLES[lastLang]; R.lang = lastLang; }
+  // mention au-dessus du nom de l'entreprise (« SOUS-TRAITANT », « PRESTATAIRE »…) : automatique selon la langue, ou personnalisée
+  const ids = subIdsOf(insp);
+  const kindKey = ids.length === 1 ? (subs[insp.subId]?.type === 'sub' ? 'sub' : 'entreprise') : ids.length ? 'multi' : 'zone';
+  const kindAuto = () => (RTXT[R.lang] || RTXT.en).type[kindKey];
+  const kindOf = () => (R.kind || '').trim() ? R.kind.trim().toUpperCase() : kindAuto();
   const save = debounce(() => db.put('inspections', insp), 300);
   onCleanup(() => save.flush());
   view.innerHTML = `
     <div class="report-preview">
       <div class="rp-band">${esc(R.title)}</div>
-      <div class="rp-body"><small>${subIdsOf(insp).length === 1 ? esc(typeOf(subs[insp.subId]).label.toUpperCase()) : subIdsOf(insp).length ? 'ENTREPRISES' : 'AUDIT DE ZONE'}</small><b>${esc(auditLabel(insp, subs))}</b>
+      <div class="rp-body"><small id="rp-kind">${esc(kindOf())}</small><b>${esc(auditLabel(insp, subs))}</b>
         <span>${dateFR(insp.date)} · ${esc(insp.inspectors || '')}</span></div>
     </div>
     <div class="section-head"><span>Page de garde</span></div>
@@ -1741,12 +1832,13 @@ async function vReport(id) {
       <label class="f" style="margin-top:0">Langue du rapport</label>
       <div class="seg" id="r-lang"><button type="button" data-lang="en" class="${R.lang !== 'fr' ? 'on' : ''}">English</button><button type="button" data-lang="fr" class="${R.lang === 'fr' ? 'on' : ''}">Français</button></div>
       <label class="f">Titre du rapport</label><input class="in" data-r="title" value="${esc(R.title)}">
+      <label class="f">Mention au-dessus du nom</label><input class="in" data-r="kind" value="${esc(R.kind || '')}" placeholder="${esc(kindAuto())} (automatique)">
       <label class="f">À l’attention de</label><input class="in" data-r="to" value="${esc(R.to)}" placeholder="ex. Direction de chantier ${esc(subIdsOf(insp).length === 1 ? subs[insp.subId]?.name || '' : '')}">
       <label class="f">Synthèse</label><textarea class="in" data-r="summary" rows="5" placeholder="Message d’introduction : contexte de la visite, points forts, priorités…">${esc(R.summary)}</textarea>
     </div>
     <div class="section-head"><span>Informations de l’audit</span></div>
     <div class="card">
-      <label class="f" style="margin-top:0">Project / Site</label><input class="in" data-i="site" value="${esc(insp.site || '')}">
+      <label class="f" style="margin-top:0">Projet / chantier</label><input class="in" data-i="site" value="${esc(insp.site || '')}">
       <label class="f">Zone</label><input class="in" data-i="zone" list="zones" value="${esc(insp.zone || '')}"><datalist id="zones">${SEED_LOCATIONS.map(l => `<option value="${esc(l)}">`).join('')}</datalist>
       <div class="btns" style="margin-bottom:0"><div><label class="f">Inspecteur(s)</label><input class="in" data-i="inspectors" value="${esc(insp.inspectors || '')}"></div>
       <div><label class="f">Date</label><input class="in" type="date" data-i="date" value="${esc(insp.date)}"></div></div>
@@ -1757,7 +1849,7 @@ async function vReport(id) {
     <button class="link-btn" id="reset-r" style="display:block;margin:8px auto">Rétablir les textes par défaut</button>`;
   view.addEventListener('input', e => {
     const r = e.target.dataset.r, i = e.target.dataset.i;
-    if (r) { R[r] = e.target.value; if (r === 'title') view.querySelector('.rp-band').textContent = e.target.value; save(); }
+    if (r) { R[r] = e.target.value; if (r === 'title') view.querySelector('.rp-band').textContent = e.target.value; if (r === 'kind') $('#rp-kind').textContent = kindOf(); save(); }
     if (i) { insp[i] = e.target.value; save(); }
   });
   view.addEventListener('change', e => { const k = e.target.dataset.sec; if (k) { R.sections[k] = e.target.checked; save(); } });
@@ -1765,6 +1857,7 @@ async function vReport(id) {
     const b = e.target.closest('[data-lang]'); if (!b || b.dataset.lang === R.lang) return;
     if (!R.title || R.title === REPORT_TITLES[R.lang]) { R.title = REPORT_TITLES[b.dataset.lang]; view.querySelector('[data-r=title]').value = R.title; view.querySelector('.rp-band').textContent = R.title; }
     R.lang = b.dataset.lang; db.setMeta('reportLang', R.lang);
+    $('#rp-kind').textContent = kindOf(); view.querySelector('[data-r=kind]').placeholder = kindAuto() + ' (automatique)';
     $('#r-lang').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); save.flush();
   };
   $('#reset-r').onclick = () => { const lang = R.lang || 'en'; insp.report = { ...REPORT_DEFAULTS, lang, title: REPORT_TITLES[lang], sections: { ...REPORT_DEFAULTS.sections } }; save.flush(); render(); };
@@ -1812,10 +1905,20 @@ const routes = [
 ];
 
 let renderSeq = 0;
+/** Menu latéral (écran large) : projet actif en bas, cliquable pour en changer */
+function drawSideFoot() {
+  const f = document.getElementById('side-foot'); if (!f) return;
+  f.innerHTML = PROJECT ? `<button type="button" class="side-proj"><span class="side-dot" style="background:${esc(PROJECT.color || '#1A56A8')}">${esc(abbr(PROJECT.name))}</span>
+    <span class="side-pname"><b>${esc(PROJECT.name)}</b><small>${esc(PROJECT.site || 'Projet actif')} · changer</small></span></button>
+    <span class="side-ver">PRT HSE · v${APP_VERSION}</span>` : '';
+  f.querySelector('.side-proj')?.addEventListener('click', () => projectSheet());
+}
 async function render() {
   const seq = ++renderSeq;
   cleanups.forEach(f => { try { f(); } catch { /* ignore */ } }); cleanups = [];
-  document.querySelectorAll('.sheet-bg').forEach(s => s.remove());
+  document.querySelectorAll('.sheet-bg, .kghost').forEach(s => s.remove());
+  if (PROJECT) await loadProject(); // projet actif relu à chaque écran (entreprises cochées, nom, plans…)
+  drawSideFoot();
   // nouveau nœud pour supprimer les écouteurs de l'écran précédent
   const fresh = view.cloneNode(false); view.replaceWith(fresh); view = fresh;
   fresh.className = ''; // chaque écran repart d'une mise en page neutre (sinon le mode « plan » restait actif)

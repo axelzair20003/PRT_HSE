@@ -117,7 +117,7 @@ const abbr3 = n => (n || '?').replace(/[^A-Za-z0-9]/g, '').slice(0, 3).toUpperCa
 
 export const REPORT_TITLES = { en: TXT.en.title, fr: TXT.fr.title };
 export const REPORT_DEFAULTS = {
-  title: TXT.en.title, to: '', summary: '', lang: 'en',
+  title: TXT.en.title, to: '', summary: '', lang: 'en', kind: '',
   sections: { findings: true, actions: true, plan: true, details: true, photos: true, guide: true },
 };
 
@@ -172,7 +172,7 @@ export async function buildPDF(insp) {
     if (lb) { const lu = await blobToDataURL(lb); const ls = await imgSize(lu); const lh = 14, lw = Math.min(40, lh * ls.w / ls.h); doc.addImage(lu, 'JPEG', W - M - lw, 19, lw, lw * ls.h / ls.w); }
   }
   doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...MUTED);
-  doc.text(L.type[sub.type] || L.type.entreprise, M, y);
+  doc.text((R.kind || '').trim() ? R.kind.trim().toUpperCase() : (L.type[sub.type] || L.type.entreprise), M, y);
   doc.setFont('helvetica', 'bold'); doc.setFontSize(sub.name.length > 28 ? 17 : 24); doc.setTextColor(...INK);
   doc.text(doc.splitTextToSize(sub.name || '—', CW - 50)[0], M, y + 10);
   if (sub.color) { doc.setFillColor(...hex(sub.color)); doc.rect(M - 4, y - 3.5, 1.6, 15, 'F'); }
