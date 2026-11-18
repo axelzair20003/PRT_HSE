@@ -1,9 +1,10 @@
 // Exports Excel (4 feuilles identiques au fichier d'origine), PDF, partage iOS.
 import { THEMES } from './prt-data.js';
 import { SCALE, RATINGS, NA, overallScore, themeScore, rating, criterionOfRef } from './calc.js';
-import { renderPlanSnapshot } from './plan.js';
+import { renderPlanSnapshot, bbox } from './plan.js';
 import * as db from './db.js';
 import { TXT, THEME_FR, CRIT_FR, RATING_FR, RANGE_FR } from './report-fr.js';
+import { fillPRTTemplate } from './xlsx-template.js';
 
 const subIdsOf = i => Array.isArray(i?.subIds) ? i.subIds : (i?.subId ? [i.subId] : []);
 const subNames = (i, subs) => subIdsOf(i).map(id => subs[id]?.name).filter(Boolean);
@@ -21,9 +22,33 @@ export async function loadContext(inspections, { allActions = false } = {}) {
 }
 
 // ---------------- EXCEL ----------------
+// ExcelJS n'est chargé qu'au moment d'un export (≈ 1 Mo, gardé hors ligne par le service worker)
+let excelJS = null;
+const loadExcelJS = () => window.ExcelJS ? Promise.resolve(window.ExcelJS) : (excelJS ||= new Promise((res, rej) => {
+  const sc = document.createElement('script'); sc.src = 'vendor/exceljs.min.js';
+  sc.onload = () => res(window.ExcelJS); sc.onerror = () => { excelJS = null; rej(new Error('Module Excel indisponible')); };
+  document.head.appendChild(sc);
+}));
+const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+/** Un audit = le fichier PRT d'origine, rempli (même mise en page, mêmes formules, mêmes listes déroulantes) */
+async function buildXLSXFromTemplate(insp, ctx) {
+  const [ExcelJS, tpl] = await Promise.all([loadExcelJS(), fetch('assets/prt-template.xlsx').then(r => { if (!r.ok) throw new Error('Modèle Excel introuvable'); return r.arrayBuffer(); })]);
+  const out = await fillPRTTemplate(ExcelJS, tpl, {
+    subject: subjectOf(insp, ctx.subs), site: insp.site || '', date: dateFR(insp.date), inspectors: insp.inspectors || '', ref: insp.ref || '',
+    bonus: insp.bonus, penalty: insp.penalty,
+    themes: THEMES.map(t => ({ ref: t.ref, criteria: t.criteria.map(c => { const sc = insp.scores?.[c.ref] || {}; return { ref: c.ref, v: typeof sc.v === 'number' ? sc.v : sc.v === NA ? 'N/A' : null, c: sc.c || '' }; }) })),
+    actions: ctx.actions.filter(a => a.inspectionId === insp.id).map(a => ({ observation: a.observation || '', priority: a.priority || '', corrective: a.corrective || '', responsibility: a.responsibility || '', dueDate: dateFR(a.dueDate), status: a.status || 'Open', reference: actionRef(a) })),
+  });
+  return new Blob([out], { type: XLSX_TYPE });
+}
+
 export async function buildXLSX(inspections, opts = {}) {
   const XLSX = window.XLSX;
   const ctx = await loadContext(inspections, opts);
+  if (inspections.length === 1 && !opts.allActions) {
+    try { return await buildXLSXFromTemplate(inspections[0], ctx); } catch (e) { console.warn('Export modèle PRT indisponible, export simple', e); }
+  }
   const multi = inspections.length > 1;
   const pctCells = { scoring: [], summary: [] };
 
@@ -290,7 +315,38 @@ export async function buildPDF(insp) {
   for (const [ref, sc] of Object.entries(insp.scores || {})) for (const id of sc?.photos || []) photos.push({ id, ref, label: `${ref} ${(FR && CRIT_FR[ref]) || criterionOfRef(ref)?.name || ''}`, comment: sc.c || '' });
   acts.forEach((a, i) => (a.photos || []).forEach(id => photos.push({ id, ref: `A${i + 1}`, label: `${L.action} ${i + 1} — ${L.before} — ${aRef(a) || ''}`, comment: a.observation || '' })));
   acts.forEach((a, i) => (a.photosAfter || []).forEach(id => photos.push({ id, ref: `A${i + 1}+`, label: `${L.action} ${i + 1} — ${L.after}`, comment: a.corrective || '' })));
+  const goods = (insp.goods || []).filter(g => g.text || (g.photos || []).length);
+  goods.forEach((g, i) => (g.photos || []).forEach(id => photos.push({ id, ref: `G${i + 1}`, label: `${L.good} ${i + 1}${g.critRef ? ' — ' + g.critRef + ' ' + ((FR && CRIT_FR[g.critRef]) || criterionOfRef(g.critRef)?.name || '') : ''}`, comment: g.text || '' })));
   photos.forEach((p, i) => { p.n = 'P' + (i + 1); });
+
+  // ============ BONNES PRATIQUES ============
+  if (goods.length) {
+    ensure(30);
+    section(L.goods, L.goodsSub);
+    doc.autoTable({
+      ...tableDefaults, startY: y,
+      head: [L.goodHead],
+      headStyles: { ...(tableDefaults.headStyles || {}), fillColor: [46, 125, 50], textColor: 255 },
+      body: goods.map((g, i) => [g.critRef || '—', g.critRef ? ((FR && CRIT_FR[g.critRef]) || criterionOfRef(g.critRef)?.name || '') : '—', g.text || '—', photos.filter(p => p.ref === `G${i + 1}`).map(p => p.n).join(', ')]),
+      columnStyles: { 0: { cellWidth: 12 }, 1: { cellWidth: 52 }, 3: { cellWidth: 18, halign: 'center' } },
+    });
+    y = doc.lastAutoTable.finalY + 4;
+  }
+  // ============ SIGNATURE ============
+  const drawSignature = async () => {
+    const sg = insp.signature; if (!sg?.blobId) return;
+    const b = await db.getBlob(sg.blobId); if (!b) return;
+    ensure(48);
+    section(L.signTitle);
+    doc.setFontSize(8.5); doc.setTextColor(...MUTED); doc.text(doc.splitTextToSize(L.signNote, CW), M, y); y += 6;
+    const url = await blobToDataURL(b), sz = await imgSize(url), h = 24, w = Math.min(70, h * sz.w / sz.h);
+    doc.setDrawColor(...LINE); doc.roundedRect(M, y, w + 6, h + 6, 2, 2);
+    doc.addImage(url, 'JPEG', M + 3, y + 3, w, h);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(...INK);
+    doc.text(L.signText(sg.name, sg.role, dateFR((sg.date || '').slice(0, 10))), M + w + 12, y + h / 2 + 4);
+    doc.setFont('helvetica', 'normal');
+    y += h + 12;
+  };
 
   if (R.sections.actions) {
   // ============ ACTIONS CORRECTIVES ============
@@ -315,8 +371,8 @@ export async function buildPDF(insp) {
     });
     y = doc.lastAutoTable.finalY + 6;
   }
-
-  }
+  await drawSignature();
+  } else await drawSignature();
 
   // ============ LOCALISATION ============
   const subColor = sub.color || '#0B2D5B';
@@ -325,14 +381,17 @@ export async function buildPDF(insp) {
   if (R.sections.plan && plan?.blobId && pins.length) {
     newPage(L.plan);
     const url = await db.blobURL(plan.blobId);
-    const full = await renderPlanSnapshot(url, pins, { maxW: 2200 });
+    const areas = insp.area?.pts?.length > 2 ? [{ pts: insp.area.pts, color: subColor }] : [];
+    const full = await renderPlanSnapshot(url, pins, { maxW: 2200, areas });
     const fs = await imgSize(full);
     let ih = Math.min(120, CW * fs.h / fs.w), iw = ih * fs.w / fs.h;
     doc.addImage(full, 'JPEG', M + (CW - iw) / 2, y, iw, ih); y += ih + 5;
     doc.setFontSize(8.5); doc.setTextColor(...MUTED);
     doc.text(L.planLegend(pinLabel, insp.zone, acts.some(a => a.pin)), M, y); y += 7;
     if (insp.pin) {
-      const zoom = await renderPlanSnapshot(url, pins, { maxW: 1400, crop: { x: insp.pin.x, y: insp.pin.y, size: 0.3 } });
+      const b = areas.length ? bbox(areas[0].pts) : null;
+      const crop = b ? { x: b.x + b.w / 2, y: b.y + b.h / 2, size: Math.min(0.7, Math.max(0.15, Math.max(b.w, b.h) * 1.5)) } : { x: insp.pin.x, y: insp.pin.y, size: 0.3 };
+      const zoom = await renderPlanSnapshot(url, pins, { maxW: 1400, crop, areas });
       doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(...INK); doc.text(L.closeUp, M, y); y += 3;
       doc.addImage(zoom, 'JPEG', M, y, 100, 100);
     }

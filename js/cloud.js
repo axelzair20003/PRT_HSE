@@ -4,6 +4,7 @@
 // (visibles uniquement par l'admin, filtrées par le serveur) sont récupérées en retour.
 import { CLOUD } from './config.js';
 import * as db from './db.js';
+import { overallScore } from './calc.js';
 
 export const enabled = !!(CLOUD.url && CLOUD.anonKey);
 let sb = null;
@@ -44,6 +45,9 @@ async function loadProfile() {
     const { data, error } = await sb.from('profiles').select('*').eq('id', uid()).single();
     if (error) throw error;
     profile = data; await db.setMeta('profile', data);
+    // un droit d'aperçu vient d'être accordé : on récupère aussi l'historique de l'équipe
+    const key = OPT_IN.map(k => k + ':' + (data?.perms?.[k] === true)).join(',');
+    if (key !== await db.getMeta('optInSeen')) { await db.setMeta('optInSeen', key); await db.setMeta('lastPull', '1970-01-01T00:00:00Z'); }
   } catch { profile = await db.getMeta('profile'); }
 }
 
@@ -119,7 +123,7 @@ export function sync() {
   return running;
 }
 
-const photosOf = (store, r) => store === 'inspections' ? Object.values(r.scores || {}).flatMap(s => s?.photos || [])
+const photosOf = (store, r) => store === 'inspections' ? [...Object.values(r.scores || {}).flatMap(s => s?.photos || []), ...(r.goods || []).flatMap(g => g.photos || []), r.signature?.blobId]
   : store === 'actions' ? [...(r.photos || []), ...(r.photosAfter || [])] : store === 'plans' ? [r.blobId] : (store === 'subs' || store === 'projects') ? [r.logoId] : [];
 const blobPath = (store, owner, id) => ADMIN_ONLY.includes(store) ? { bucket: 'shared', path: id } : { bucket: 'photos', path: `${owner}/${id}` };
 
@@ -144,10 +148,27 @@ async function push() {
       data: { ...rec, owner }, updated_at: rec.updatedAt || new Date().toISOString(), deleted: !!rec.deleted,
     });
     if (error) throw error;
+    // aperçu de l'audit (sans notes détaillées, commentaires ni photos) : visible des HSE qui ont le droit « aperçu équipe »
+    if (store === 'inspections') {
+      const { error: e2 } = await sb.from('docs').upsert({
+        id: 'sum-' + rec.id, kind: 'summary', owner, project: rec.projectId || null,
+        data: summaryOf(rec), updated_at: rec.updatedAt || new Date().toISOString(), deleted: !!rec.deleted,
+      });
+      if (e2) throw e2;
+    }
     done.push(...seqs);
   }
   await db.outboxClear(done);
 }
+
+function summaryOf(i) {
+  const o = overallScore(i.scores || {}, i.bonus, i.penalty);
+  return { id: i.id, date: i.date, zone: i.zone || '', area: i.area || null, pin: i.pin || null, planId: i.planId || null, projectId: i.projectId || null,
+    subIds: i.subIds || (i.subId ? [i.subId] : []), visitId: i.visitId || null, inspectors: i.inspectors || '', ref: i.ref || '',
+    pct: o.pct, done: o.themes.reduce((a, t) => a + t.done, 0) };
+}
+/** Aperçu des audits des autres HSE (droit « aperçu équipe ») */
+export async function teamAudits() { return Object.values(await db.getMeta('teamAudits', {})).filter(a => !a.deleted); }
 
 async function uploadBlob(id, { bucket, path }) {
   const r = await db.blobRecord(id);
@@ -160,10 +181,15 @@ async function uploadBlob(id, { bucket, path }) {
 async function pull() {
   let since = await db.getMeta('lastPull', '1970-01-01T00:00:00Z');
   const paths = await db.getMeta('blobPaths', {});
+  const team = await db.getMeta('teamAudits', {});
   for (;;) {
     const { data, error } = await sb.from('docs').select('*').gt('updated_at', since).order('updated_at').limit(500);
     if (error) throw error;
     for (const row of data) {
+      if (row.kind === 'summary') {
+        if (!isAdmin() && row.owner !== uid()) { team[row.data.id] = { ...row.data, owner: row.owner, deleted: row.deleted, updatedAt: row.updated_at }; }
+        since = row.updated_at; continue;
+      }
       const store = STORE[row.kind];
       const local = await db.get(store, row.id);
       const pending = (await db.outboxAll()).some(o => o.store === store && o.recordId === row.id);
@@ -176,6 +202,7 @@ async function pull() {
     if (data.length < 500) break;
   }
   await db.setMeta('blobPaths', paths);
+  await db.setMeta('teamAudits', team);
   await db.setMeta('lastPull', since);
 }
 
@@ -227,8 +254,12 @@ export const PERMS = {
   details: 'Voir le détail de ses audits',
   export: 'Exporter PDF / Excel',
   actions: 'Gérer les actions',
+  team: 'Voir les audits de l’équipe (aperçu)',
+  teamActions: 'Voir les actions ouvertes des autres',
 };
+/** droits à activer explicitement (décochés par défaut) */
+export const OPT_IN = ['team', 'teamActions'];
 /** Droit accordé ? (mode local ou admin : tout est permis) */
-export const can = p => !enabled || isAdmin() || profile?.perms?.[p] !== false;
+export const can = p => OPT_IN.includes(p) ? enabled && !isAdmin() && profile?.perms?.[p] === true : (!enabled || isAdmin() || profile?.perms?.[p] !== false);
 /** Projet accessible ? (null = tous les projets) */
 export const canProject = id => !enabled || isAdmin() || !Array.isArray(profile?.projects) || profile.projects.includes(id);

@@ -14,7 +14,7 @@ export const SCALE = [
 
 export const RATINGS = [
   { name: 'Excellent', min: 0.9, range: '>= 90%', color: '#1B5E20', fg: '#fff' },
-  { name: 'Good', min: 0.8, range: '80% to < 90%', color: '#43A047', fg: '#fff' },
+  { name: 'Good', min: 0.8, range: '80% to < 90%', color: '#2E7D32', fg: '#fff' },
   { name: 'Satisfactory', min: 0.7, range: '70% to < 80%', color: '#FBC02D', fg: '#000' },
   { name: 'Weak', min: 0.5, range: '50% to < 70%', color: '#EF6C00', fg: '#000' },
   { name: 'Unacceptable', min: -Infinity, range: '< 50%', color: '#C62828', fg: '#fff' },

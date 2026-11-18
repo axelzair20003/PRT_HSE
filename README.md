@@ -55,7 +55,21 @@ Au premier lancement, l'app charge automatiquement :
 
 **Démarrer une inspection = 1 tap** sur le sous-traitant depuis l'accueil. L'inspecteur (« Ahmed » par défaut, modifiable dans Réglages), la date, le site et le plan sont remplis tout seuls. Placer la zone sur le plan est facultatif (carte « 📍 Placer la zone » dans l'inspection).
 
-Pour remplacer le plan : remplacer `assets/plan-sam2a.jpg` par une image du même nom, ou importer un autre plan via Réglages → Gérer les plans.
+Pour remplacer le plan : remplacer `assets/plan-sam2a.jpg` par une image du même nom, ou importer un autre plan via Réglages → Projets et plans.
+
+### Confidentialité du plan (chantier client)
+Le dépôt GitHub est public : tout fichier qu'il contient est téléchargeable. Pour ne plus publier la vue aérienne du site :
+1. supprimez `assets/plan-sam2a.jpg` du dépôt GitHub ;
+2. les téléphones qui ont déjà ouvert l'app **gardent** le plan (il est stocké dans le téléphone) ;
+3. sur un nouveau téléphone, importez le plan via Réglages → Projets et plans → « Ajouter un plan » (le fichier vient de votre PC ou d'un mail interne, pas d'internet).
+L'app démarre normalement sans ce fichier.
+
+## Nouveautés v3.9
+- **Lisibilité chantier** : textes agrandis (rien d'important sous 14 px), contrastes renforcés, Résumé lisible thème par thème.
+- **Photos** : grandes vignettes, visionneuse plein écran (double-tap pour zoomer), **annotation** (flèche, cercle, trait, texte).
+- **Bonnes pratiques** : sur un critère noté 5, ou depuis l'audit ; section verte dans le PDF.
+- **Signature** du responsable de l'entreprise en fin d'audit, reprise dans le PDF.
+- **Protection des données** : invitation à installer l'app sur l'écran d'accueil, rappel de sauvegarde hebdomadaire (mode sans compte), réglage « joindre les photos » pour l'envoi aux entreprises.
 
 ## Utilisation rapide
 - Thème → gros boutons 0–5 / N/A (re-taper une note l'efface). Une note ≤ 2 propose une action corrective.

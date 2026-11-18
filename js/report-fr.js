@@ -118,6 +118,9 @@ export const TXT = {
       'Overall Site Score = average of the assessed themes + BE SAFE bonus points / 100 - LSR penalty points / 100, limited between 0 % and 100 %.',
     ],
     footer: 'PRT – Site HSE Performance Rating Tool', page: 'Page',
+    goods: 'Good practices observed', goodsSub: 'Positive recognition — BE SAFE', goodHead: ['Ref.', 'Audited element', 'Good practice', 'Photo'], good: 'Good practice',
+    signTitle: 'Acknowledgement by the sub-contractor', signText: (n, r, d) => `${n}${r ? ', ' + r : ''} — signed on ${d}`,
+    signNote: 'The undersigned acknowledges the findings and corrective actions of this inspection.',
   },
   fr: {
     title: 'Évaluation de la performance HSE — Audit entreprise',
@@ -160,5 +163,8 @@ export const TXT = {
       'Score global = moyenne des thèmes évalués + points bonus BE SAFE / 100 - points de pénalité LSR / 100, limité entre 0 % et 100 %.',
     ],
     footer: 'PRT – Outil d’évaluation de la performance HSE', page: 'Page',
+    goods: 'Bonnes pratiques relevées', goodsSub: 'Reconnaissance positive — BE SAFE', goodHead: ['Réf.', 'Élément audité', 'Bonne pratique', 'Photo'], good: 'Bonne pratique',
+    signTitle: 'Prise de connaissance par l’entreprise', signText: (n, r, d) => `${n}${r ? ', ' + r : ''} — signé le ${d}`,
+    signNote: 'Le signataire reconnaît avoir pris connaissance des constats et des actions correctives de cet audit.',
   },
 };

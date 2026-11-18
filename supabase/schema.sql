@@ -48,7 +48,7 @@ create table if not exists public.docs (
 );
 alter table public.docs add column if not exists project text;
 alter table public.docs drop constraint if exists docs_kind_check;
-alter table public.docs add constraint docs_kind_check check (kind in ('inspection', 'action', 'sub', 'plan', 'project'));
+alter table public.docs add constraint docs_kind_check check (kind in ('inspection', 'action', 'sub', 'plan', 'project', 'summary'));
 create index if not exists docs_updated_idx on public.docs (updated_at);
 create index if not exists docs_owner_idx on public.docs (owner);
 
@@ -63,6 +63,12 @@ create or replace function public.can_project(p text) returns boolean
 language sql stable security definer set search_path = public as $$
   select exists (select 1 from profiles where id = auth.uid() and active
     and (role = 'admin' or projects is null or cardinality(projects) = 0 or p is null or p = any(projects)));
+$$;
+
+-- droit accordé par l'administrateur (les droits « aperçu équipe » et « actions des autres » sont décochés par défaut)
+create or replace function public.has_perm(p text) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from profiles where id = auth.uid() and active and coalesce((perms ->> p)::boolean, false));
 $$;
 
 create or replace function public.is_active() returns boolean
@@ -110,20 +116,26 @@ create policy "profiles: admin modifie" on public.profiles
 drop policy if exists "docs: lecture" on public.docs;
 create policy "docs: lecture" on public.docs
   for select using (
-    public.is_active() and (kind in ('sub', 'plan', 'project') or owner = auth.uid() or public.is_admin())
+    public.is_active() and (
+      kind in ('sub', 'plan', 'project') or owner = auth.uid() or public.is_admin()
+      -- aperçu des audits de l'équipe (date, zone, entreprise, score — sans le détail)
+      or (kind = 'summary' and public.has_perm('team') and public.can_project(project))
+      -- actions relevées par les autres HSE (l'app n'affiche que celles encore ouvertes)
+      or (kind = 'action' and public.has_perm('teamActions') and public.can_project(project))
+    )
   );
 
 drop policy if exists "docs: création" on public.docs;
 create policy "docs: création" on public.docs
   for insert with check (
-    public.is_active() and ((kind in ('inspection', 'action') and owner = auth.uid() and public.can_project(project)) or public.is_admin())
+    public.is_active() and ((kind in ('inspection', 'action', 'summary') and owner = auth.uid() and public.can_project(project)) or public.is_admin())
   );
 
 drop policy if exists "docs: modification" on public.docs;
 create policy "docs: modification" on public.docs
   for update
-  using (public.is_active() and ((kind in ('inspection', 'action') and owner = auth.uid()) or public.is_admin()))
-  with check (public.is_active() and ((kind in ('inspection', 'action') and owner = auth.uid()) or public.is_admin()));
+  using (public.is_active() and ((kind in ('inspection', 'action', 'summary') and owner = auth.uid()) or public.is_admin()))
+  with check (public.is_active() and ((kind in ('inspection', 'action', 'summary') and owner = auth.uid()) or public.is_admin()));
 -- pas de suppression physique : l'app marque deleted = true
 
 -- ---------- Stockage des fichiers ----------

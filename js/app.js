@@ -2,7 +2,7 @@
 import { THEMES } from './prt-data.js';
 import { NA, SCALE, RATINGS, rating, themeScore, overallScore, criterionOfRef, themeOfRef, fmtPct } from './calc.js';
 import * as db from './db.js';
-import { createPlanViewer } from './plan.js';
+import { createPlanViewer, centroid } from './plan.js';
 import { compressImage, planFileToBlob, pdfPageCount } from './images.js';
 import { ic } from './icons.js';
 import * as cloud from './cloud.js';
@@ -10,7 +10,7 @@ import { SEED_SUBS, SEED_LOCATIONS, SEED_PLAN, SEED_SITE } from './seed.js';
 import { CRIT_FR, TXT as RTXT } from './report-fr.js';
 import { REPORT_DEFAULTS, REPORT_TITLES, buildXLSX, buildPDF, shareFile, download, canShareFile, actionRef } from './export.js';
 
-export const APP_VERSION = '3.6.0';
+export const APP_VERSION = '3.9.0';
 
 // ---------- utilitaires ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -99,8 +99,56 @@ function showScale() {
 
 const badge = pct => { const r = rating(pct); return `<span class="badge" style="background:${r.color};color:${r.fg}">${pct === null ? 'N/A' : Math.round(pct * 100) + '%'}</span>`; };
 const ratingChip = pct => { const r = rating(pct); return `<span class="chip" style="background:${r.color};color:${r.fg}">${r.name}</span>`; };
-const subChip = s => s ? `<span class="chip" style="background:${esc(s.color || '#1A56A8')};color:#fff">${esc(s.name || 'Sans nom')}</span>` : '<span class="chip" style="background:#9E9E9E">—</span>';
+/** Texte lisible sur une couleur d'entreprise : foncé sur les couleurs claires (jaune, orange clair…), blanc sinon */
+const inkOn = hex => {
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '').trim()); if (!m) return '#fff';
+  const n = parseInt(m[1], 16), lin = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+  const L = 0.2126 * lin(n >> 16 & 255) + 0.7152 * lin(n >> 8 & 255) + 0.0722 * lin(n & 255);
+  return (L + 0.05) / 0.05 > 1.05 / (L + 0.05) ? '#111827' : '#fff';
+};
+/** couleur de note utilisée comme TEXTE sur fond clair : jaune et orange foncés pour rester lisibles */
+const textTone = c => ({ '#FBC02D': '#8A6100', '#EF6C00': '#B45309' })[c] || c;
+/** pose --on (couleur du texte) sur tout élément coloré par une entreprise (--c) */
+function applyInk(root) {
+  root.querySelectorAll?.('[style*="--c"]').forEach(el => { const c = el.style.getPropertyValue('--c'); if (c) el.style.setProperty('--on', inkOn(c)); });
+}
+const subChip = s => s ? `<span class="chip" style="background:${esc(s.color || '#1A56A8')};color:${inkOn(s.color || '#1A56A8')}">${esc(s.name || 'Sans nom')}</span>` : '<span class="chip" style="background:#9E9E9E">—</span>';
 
+/** Sauvegarde complète (JSON) : à garder hors du téléphone (mail, OneDrive…) */
+async function backupNow() {
+  toast('Préparation de la sauvegarde…');
+  const json = await db.exportAll();
+  await db.setMeta('lastBackup', new Date().toISOString());
+  readySheet(new File([JSON.stringify(json)], `PRT-HSE-sauvegarde-${todayISO()}.json`, { type: 'application/json' }));
+}
+const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+let installEvt = null;
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; });
+/** Bandeaux de l'accueil : installer l'app (sinon l'iPhone peut effacer les données), sauvegarder (mode sans compte) */
+async function homeNotices(nAudits) {
+  const out = [], now = Date.now();
+  const snooze = await db.getMeta('noticeSnooze', {});
+  const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  if (!isStandalone() && !(snooze.install > now) && (ios || installEvt)) out.push(`<div class="card notice" data-notice="install"><span class="notice-ic">${ic('download', 20)}</span>
+    <span class="grow"><b>Installez l’app sur l’écran d’accueil</b><span class="muted small">${ios ? 'Touchez Partager ⬆︎ puis « Sur l’écran d’accueil ». ' : ''}Elle s’ouvre plus vite, en plein écran, et vos audits restent protégés.</span></span>
+    ${installEvt ? '<button class="btn primary small-btn" data-inst>Installer</button>' : ''}<button class="notice-x" data-snooze="install" aria-label="Plus tard">${ic('x', 18)}</button></div>`);
+  if (!cloud.enabled && nAudits) {
+    const last = await db.getMeta('lastBackup');
+    const days = last ? Math.floor((now - new Date(last)) / 864e5) : null;
+    if ((days === null || days >= 7) && !(snooze.backup > now)) out.push(`<div class="card notice warn" data-notice="backup"><span class="notice-ic">${ic('alert', 20)}</span>
+      <span class="grow"><b>${days === null ? 'Aucune sauvegarde pour le moment' : `Dernière sauvegarde il y a ${days} jours`}</b><span class="muted small">Vos audits ne sont que dans ce téléphone. Une sauvegarde par semaine suffit.</span></span>
+      <button class="btn primary small-btn" data-bk>Sauvegarder</button><button class="notice-x" data-snooze="backup" aria-label="Plus tard">${ic('x', 18)}</button></div>`);
+  }
+  return out.join('');
+}
+function bindNotices() {
+  view.querySelectorAll('[data-snooze]').forEach(b => b.onclick = async () => {
+    const sn = await db.getMeta('noticeSnooze', {}); sn[b.dataset.snooze] = Date.now() + (b.dataset.snooze === 'install' ? 7 : 3) * 864e5;
+    await db.setMeta('noticeSnooze', sn); b.closest('.notice').remove();
+  });
+  view.querySelector('[data-bk]')?.addEventListener('click', async e => { await backupNow(); e.target.closest('.notice')?.remove(); });
+  view.querySelector('[data-inst]')?.addEventListener('click', async () => { if (!installEvt) return; installEvt.prompt(); const r = await installEvt.userChoice.catch(() => null); installEvt = null; if (r?.outcome === 'accepted') view.querySelector('[data-notice=install]')?.remove(); });
+}
 async function getSettings() { return await db.getMeta('settings', { inspector: 'Ahmed', site: SEED_SITE, theme: 'auto' }); }
 async function saveSettings(s) { await db.setMeta('settings', s); }
 function applyTheme(t) {
@@ -125,7 +173,17 @@ async function loadProject() {
   return PROJECT;
 }
 /** Enregistrements du projet courant uniquement */
-async function pAll(store) { return (await db.all(store)).filter(inProject); }
+async function pAll(store) {
+  const l = (await db.all(store)).filter(inProject);
+  // HSE : ses propres actions seulement (celles des autres, s'il a le droit, ne s'affichent que sur l'audit d'une entreprise)
+  return store === 'actions' && cloud.enabled && !cloud.isAdmin() ? l.filter(a => !a.owner || a.owner === cloud.uid()) : l;
+}
+const isMine = r => !cloud.enabled || cloud.isAdmin() || !r.owner || r.owner === cloud.uid();
+/** Actions encore ouvertes des autres HSE sur cette entreprise (droit « actions des autres ») */
+async function teamOpenActions(subId) {
+  if (!cloud.can('teamActions') || !subId) return [];
+  return (await db.all('actions')).filter(a => inProject(a) && !isMine(a) && a.subId === subId && a.status !== 'Closed' && !a.deleted).sort((a, b) => (a.dueDate || '').localeCompare(b.dueDate || ''));
+}
 async function switchProject(id) {
   await db.setMeta('project', id); await loadProject();
   const plans = await pAll('plans');
@@ -206,9 +264,103 @@ async function thumbsHTML(ids = []) {
   const urls = await Promise.all(ids.map(id => db.blobURL(id)));
   return urls.map((u, i) => u ? `<img src="${u}" data-photo="${ids[i]}" alt="photo">` : '').join('');
 }
-function photoViewer(id, onDelete) {
-  db.blobURL(id).then(u => openSheet(`<img src="${u}" style="width:100%;border-radius:12px"><div class="btns"><button class="btn danger" data-del>Supprimer</button><button class="btn primary" data-close>Fermer</button></div>`,
-    (el, close) => el.querySelector('[data-del]').onclick = async () => { if (await confirmBox('Supprimer la photo ?', '')) { close(); onDelete(); } }));
+/** Visionneuse plein écran : double-tap pour zoomer ; Annoter / Supprimer selon les droits */
+function photoViewer(id, onDelete, onReplace) {
+  db.blobURL(id).then(u => {
+    document.querySelector('.pviewer')?.remove();
+    const el = document.createElement('div');
+    el.className = 'pviewer';
+    el.innerHTML = `<div class="pv-top"><button type="button" class="pv-x" aria-label="Fermer">${ic('x', 26)}</button></div>
+      <div class="pv-scroll"><img src="${u}" alt="photo"></div>
+      <div class="pv-bar">${onReplace ? `<button type="button" class="btn" data-ann>${ic('edit', 18)} Annoter</button>` : ''}${onDelete ? `<button type="button" class="btn danger" data-del>${ic('trash', 18)} Supprimer</button>` : ''}${onReplace || onDelete ? '' : '<button type="button" class="btn primary" data-x>Fermer</button>'}</div>
+      <p class="pv-hint">Touchez deux fois la photo pour zoomer</p>`;
+    document.body.appendChild(el);
+    const close = () => { el.remove(); window.removeEventListener('hashchange', close); };
+    window.addEventListener('hashchange', close);
+    el.querySelector('.pv-x').onclick = close; el.querySelector('[data-x]')?.addEventListener('click', close);
+    let lastTap = 0;
+    el.querySelector('.pv-scroll').addEventListener('click', e => {
+      const now = Date.now(); if (now - lastTap < 320) { const sc = el.querySelector('.pv-scroll'); const z = !sc.classList.contains('zoomed'); sc.classList.toggle('zoomed', z);
+        if (z) { const r = sc.getBoundingClientRect(); sc.scrollLeft = (e.clientX - r.left) * 1.2; sc.scrollTop = (e.clientY - r.top) * 1.2; } }
+      lastTap = now;
+    });
+    el.querySelector('[data-del]')?.addEventListener('click', async () => { if (await confirmBox('Supprimer la photo ?', '')) { close(); onDelete(); } });
+    el.querySelector('[data-ann]')?.addEventListener('click', async () => { close(); const nid = await annotatePhoto(id); if (nid) { await onReplace(nid); toast('Photo annotée'); } });
+  });
+}
+
+/** Annotation d'une photo (flèche, cercle, trait, texte). Renvoie l'id de la nouvelle photo, ou null. */
+function annotatePhoto(id) {
+  return new Promise(async resolve => {
+    const url = await db.blobURL(id);
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; }).catch(() => null);
+    if (!img) { toast('Photo introuvable'); return resolve(null); }
+    const k = Math.min(1, 2000 / Math.max(img.naturalWidth, img.naturalHeight));
+    const W = Math.round(img.naturalWidth * k), H = Math.round(img.naturalHeight * k);
+    const COLORS = [['#E53935', 'Rouge'], ['#FFD600', 'Jaune'], ['#FFFFFF', 'Blanc']];
+    const TOOLS = [['arrow', 'Flèche', '<path d="M5 19 19 5M9 5h10v10"/>'], ['circle', 'Cercle', '<circle cx="12" cy="12" r="8"/>'], ['free', 'Trait', '<path d="M4 16c3-6 6 2 9-4s5-4 7-2"/>'], ['text', 'Texte', '<path d="M5 6h14M12 6v13"/>']];
+    let tool = 'arrow', color = COLORS[0][0];
+    const shapes = []; let cur = null;
+    const lw = Math.max(5, W / 160), fs = Math.max(26, W / 20);
+    const el = document.createElement('div');
+    el.className = 'annot';
+    el.innerHTML = `<div class="an-top">
+        <div class="an-tools">${TOOLS.map(([t, l, p]) => `<button type="button" data-tool="${t}" class="${t === tool ? 'on' : ''}"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">${p}</svg><span>${l}</span></button>`).join('')}</div>
+        <div class="an-colors">${COLORS.map(([c, l]) => `<button type="button" data-col="${c}" class="${c === color ? 'on' : ''}" style="--sw:${c}" aria-label="${l}"></button>`).join('')}<button type="button" class="an-undo" data-undo aria-label="Annuler le dernier trait">${ic('back', 18)}<span>Retour</span></button></div>
+      </div>
+      <div class="an-stage"><canvas width="${W}" height="${H}"></canvas></div>
+      <div class="an-bar"><button type="button" class="btn" data-cancel>Annuler</button><button type="button" class="btn primary" data-save>${ic('check', 18)} Enregistrer</button></div>`;
+    document.body.appendChild(el);
+    const cv = el.querySelector('canvas'), g = cv.getContext('2d');
+    const arrow = (a, b, c) => {
+      const ang = Math.atan2(b.y - a.y, b.x - a.x), h = lw * 4.2;
+      g.strokeStyle = c; g.lineWidth = lw; g.lineCap = 'round';
+      g.beginPath(); g.moveTo(a.x, a.y); g.lineTo(b.x, b.y); g.stroke();
+      g.beginPath(); g.moveTo(b.x, b.y); g.lineTo(b.x - h * Math.cos(ang - 0.45), b.y - h * Math.sin(ang - 0.45));
+      g.lineTo(b.x - h * Math.cos(ang + 0.45), b.y - h * Math.sin(ang + 0.45)); g.closePath(); g.fillStyle = c; g.fill();
+    };
+    const drawShape = s => {
+      g.save(); g.shadowColor = 'rgba(0,0,0,.55)'; g.shadowBlur = lw * 1.2;
+      if (s.type === 'arrow') arrow(s.a, s.b, s.color);
+      if (s.type === 'circle') { g.strokeStyle = s.color; g.lineWidth = lw; g.beginPath(); g.ellipse((s.a.x + s.b.x) / 2, (s.a.y + s.b.y) / 2, Math.abs(s.b.x - s.a.x) / 2 || 1, Math.abs(s.b.y - s.a.y) / 2 || 1, 0, 0, Math.PI * 2); g.stroke(); }
+      if (s.type === 'free') { g.strokeStyle = s.color; g.lineWidth = lw; g.lineCap = 'round'; g.lineJoin = 'round'; g.beginPath(); s.pts.forEach((p, i) => i ? g.lineTo(p.x, p.y) : g.moveTo(p.x, p.y)); g.stroke(); }
+      if (s.type === 'text') {
+        g.shadowBlur = 0; g.font = `bold ${fs}px -apple-system, Segoe UI, Roboto, sans-serif`; const w = g.measureText(s.text).width, pad = fs * 0.3;
+        g.fillStyle = 'rgba(0,0,0,.72)'; g.beginPath(); g.roundRect?.(s.a.x - pad, s.a.y - fs - pad * 0.6, w + pad * 2, fs + pad * 1.6, pad) ?? g.rect(s.a.x - pad, s.a.y - fs - pad * 0.6, w + pad * 2, fs + pad * 1.6); g.fill();
+        g.fillStyle = s.color; g.fillText(s.text, s.a.x, s.a.y);
+      }
+      g.restore();
+    };
+    const render = () => { g.drawImage(img, 0, 0, W, H); shapes.forEach(drawShape); if (cur) drawShape(cur); };
+    render();
+    const pt = e => { const r = cv.getBoundingClientRect(); return { x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height }; };
+    cv.addEventListener('pointerdown', e => {
+      e.preventDefault(); cv.setPointerCapture(e.pointerId);
+      const p = pt(e);
+      if (tool === 'text') {
+        openSheet(`<h3>Texte sur la photo</h3><input class="in" id="ant" placeholder="ex. Garde-corps manquant" autocomplete="off"><div class="btns" style="margin-top:12px"><button class="btn" data-close>Annuler</button><button class="btn primary" id="anok">Ajouter</button></div>`,
+          (sh, close) => { setTimeout(() => sh.querySelector('#ant').focus(), 50); sh.querySelector('#anok').onclick = () => { const t = sh.querySelector('#ant').value.trim(); if (t) { shapes.push({ type: 'text', a: p, text: t, color }); render(); } close(); }; });
+        return;
+      }
+      cur = tool === 'free' ? { type: 'free', pts: [p], color } : { type: tool, a: p, b: p, color };
+    });
+    cv.addEventListener('pointermove', e => { if (!cur) return; const p = pt(e); if (cur.type === 'free') cur.pts.push(p); else cur.b = p; render(); });
+    const up = () => { if (!cur) return; const s = cur; cur = null; const big = s.type === 'free' ? s.pts.length > 2 : Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y) > lw * 2; if (big) shapes.push(s); render(); };
+    cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
+    el.querySelector('.an-tools').onclick = e => { const b = e.target.closest('[data-tool]'); if (!b) return; tool = b.dataset.tool; el.querySelectorAll('[data-tool]').forEach(x => x.classList.toggle('on', x === b)); };
+    el.querySelector('.an-colors').onclick = e => {
+      if (e.target.closest('[data-undo]')) { shapes.pop(); render(); return; }
+      const b = e.target.closest('[data-col]'); if (!b) return; color = b.dataset.col; el.querySelectorAll('[data-col]').forEach(x => x.classList.toggle('on', x === b));
+    };
+    const done = v => { el.remove(); resolve(v); };
+    el.querySelector('[data-cancel]').onclick = () => done(null);
+    el.querySelector('[data-save]').onclick = async () => {
+      if (!shapes.length) return done(null);
+      render();
+      const blob = await new Promise(r => cv.toBlob(r, 'image/jpeg', 0.86));
+      done(await db.putBlob(blob));
+    };
+  });
 }
 async function addPhotos(fileList) {
   const ids = [];
@@ -232,8 +384,10 @@ async function vHome() {
   const pcts = month.map(i => overallScore(i.scores, i.bonus, i.penalty).pct).filter(x => x !== null);
   const avgPct = pcts.length ? pcts.reduce((a, b) => a + b, 0) / pcts.length : null;
   const openActs = acts.filter(a => a.status !== 'Closed').length;
+  const notices = await homeNotices(insps.length);
   view.innerHTML = `
     ${cloud.enabled ? '<button class="sync-pill" id="sync-now" hidden></button>' : ''}
+    ${notices}
     <section class="home-hero">
       <div class="hero-id">
         <img class="hero-logo" id="hero-logo" src="icons/icon-192.png" alt="">
@@ -249,7 +403,7 @@ async function vHome() {
     </section>
     ${cloud.can('audit') ? `<a class="btn primary big new-audit" href="#/start">${ic('plus')}<span>Nouvel audit<small>zone, une ou plusieurs entreprises</small></span></a>` : ''}
     <div class="home-cols"><div class="home-main">
-    <div class="section-head"><span>Audit rapide · 1 entreprise</span><span class="muted small" style="text-transform:capitalize">${esc(today)}</span></div>
+    <div class="section-head"><span>Audit rapide</span><span class="muted small" style="text-transform:capitalize">${esc(today)}</span></div>
     ${cloud.can('audit') ? (subList.some(s => !s.archived) ? subGrid(subList, insps, acts) : noCompanyCard()) : '<div class="card muted">Votre accès ne permet pas de lancer des audits. Contactez l’administrateur HSE.</div>'}
     </div><div class="home-side">
     ${late.length ? `<div class="section-head late"><span class="row" style="gap:6px">${ic('alert', 18)} Actions en retard</span><span>${late.length}</span></div>
@@ -266,6 +420,7 @@ async function vHome() {
     if (PROJECT?.logoId) { const u = await db.blobURL(PROJECT.logoId); if (u) $('#hero-logo').src = u; }
   })();
   bindSubGrid();
+  bindNotices();
   $('#pick-comp')?.addEventListener('click', pickProjectCompanies);
   drawSync();
   $('#sync-now')?.addEventListener('click', () => cloud.sync());
@@ -321,7 +476,7 @@ const hasSub = (i, id) => subIdsOf(i).includes(id);
 /** Libellé d'un audit : « TRBA », « TRBA + VKE », « TRBA + 3 autres » ou « Audit de zone » */
 function auditLabel(i, subs) {
   const n = subIdsOf(i).map(id => subs[id]?.name).filter(Boolean);
-  if (!n.length) return 'Audit de zone';
+  if (!n.length) return i.zone ? `Zone · ${i.zone}` : 'Audit de zone';
   return n.length <= 2 ? n.join(' + ') : `${n[0]} + ${n.length - 1} autres`;
 }
 const auditColor = (i, subs) => { const ids = subIdsOf(i); return ids.length === 1 ? (subs[ids[0]]?.color || '#9E9E9E') : '#0B2D5B'; };
@@ -341,7 +496,7 @@ async function startInspection(subId) {
   if (today) { location.hash = '#/insp/' + today.id; return; }
   location.hash = '#/start/' + subId;
 }
-async function createInspection(subIds, pin, zone = '', visitId = null) {
+async function createInspection(subIds, pin, zone = '', visitId = null, area = null) {
   const st = await getSettings();
   const plans = await pAll('plans');
   const last = await db.getMeta('lastPlan');
@@ -349,7 +504,7 @@ async function createInspection(subIds, pin, zone = '', visitId = null) {
   const subs = (await Promise.all(subIds.map(id => db.get('subs', id)))).filter(Boolean);
   const date = todayISO();
   const ref = await nextRef(plan, subs.length === 1 ? subs[0] : { name: subs.length ? 'MULTI' : 'ZONE' }, date);
-  return db.put('inspections', { owner: cloud.uid(), visitId, subIds, subId: subIds[0] || null, planId: plan?.id || null, pin: pin || null, zone, inspectors: cloud.enabled ? cloud.myName() : st.inspector, date, site: PROJECT?.site ? `${PROJECT.name} — ${PROJECT.site}` : (PROJECT?.name || st.site), projectId: PROJECT?.id || DEFAULT_PROJECT, ref, scores: {}, bonus: 0, penalty: 0 });
+  return db.put('inspections', { owner: cloud.uid(), visitId, subIds, subId: subIds[0] || null, planId: plan?.id || null, pin: pin || null, zone, area: area || null, inspectors: cloud.enabled ? cloud.myName() : st.inspector, date, site: PROJECT?.site ? `${PROJECT.name} — ${PROJECT.site}` : (PROJECT?.name || st.site), projectId: PROJECT?.id || DEFAULT_PROJECT, ref, scores: {}, bonus: 0, penalty: 0 });
 }
 /** Nouvel audit : zone sur le plan (facultative) + entreprises concernées (0, 1 ou plusieurs) */
 async function vStart(subId) {
@@ -359,12 +514,12 @@ async function vStart(subId) {
   setTop({ title: 'Nouvel audit', sub: `${PROJECT?.name || ''} · ${dateFR(todayISO())}`, back: '#/' });
   const plan = plans[await db.getMeta('lastPlan')] || planList[0];
   const active = subList.filter(s => !s.archived).sort((a, b) => a.name.localeCompare(b.name));
-  let pin = null;
+  const za = { pin: null, area: null, zone: '' };
   view.innerHTML = `
-    <div class="step-head"><span class="step-n">1</span><b>Où ?</b><span class="muted small">Touchez la zone sur le plan (facultatif)</span></div>
+    <div class="step-head"><span class="step-n">1</span><b>Où ?</b><span class="muted small">Touchez une zone, un point, ou tracez la zone (facultatif)</span></div>
     <div id="spick" class="pv start-map2"></div>
-    <input class="in" id="s-zone" list="zones" placeholder="Nom de la zone (ex. Roof DCH4, UTI 11…)" style="margin-top:8px">
-    <datalist id="zones">${SEED_LOCATIONS.map(l => `<option value="${esc(l)}">`).join('')}</datalist>
+    ${plan ? '<div class="plan-tools" id="s-tools"></div>' : ''}
+    <input class="in" id="s-zone" autocomplete="off" placeholder="Nom de la zone (ex. Roof DCH4, UTI 11…)" style="margin-top:8px">
     <div class="step-head"><span class="step-n">2</span><b>Quelle(s) entreprise(s) ?</b><span class="muted small" id="s-count"></span></div>
     <div class="pick-grid">${active.map(s => `<button type="button" class="pick ${chosen.has(s.id) ? 'on' : ''}" data-s="${s.id}" style="--c:${esc(s.color)}"><span class="mono xs">${esc(abbr(s.name))}</span><span class="grow">${esc(s.name)}</span>${ic('check', 16)}</button>`).join('')}</div>
     <p class="muted small" id="s-note" style="margin:8px 2px 0"></p>
@@ -374,14 +529,17 @@ async function vStart(subId) {
     $('#s-count').textContent = n ? `${n} sélectionnée${n > 1 ? 's' : ''}` : 'aucune = audit de zone';
     $('#go').textContent = n === 0 ? 'Commencer l’audit de zone' : n === 1 ? `Commencer l’audit ${subs[[...chosen][0]].name}` : `Créer ${n} audits séparés`;
     $('#s-note').textContent = n > 1 ? `Un audit et un score par entreprise. Vous passez de l’un à l’autre en un tap.` : 'Aucune entreprise cochée = audit de la zone ou du chantier en général.';
-    if (pin) pv?.setPins([{ id: 'p', ...pin, color: n === 1 ? subs[[...chosen][0]].color : '#0B2D5B', label: n === 1 ? abbr(subs[[...chosen][0]].name) : n ? '×' + n : 'ZON', ghost: true }]);
+    pv?.setPins(za.pin && !za.area ? [{ id: 'p', ...za.pin, color: n === 1 ? subs[[...chosen][0]].color : '#0B2D5B', label: n === 1 ? abbr(subs[[...chosen][0]].name) : n ? '×' + n : 'ZON', ghost: true }] : []);
   };
+  zonePicker($('#s-zone'), plan);
   let pv = null;
   if (plan) {
+    const kit = zoneKit({ plan, state: za, nameInput: $('#s-zone'), toolsEl: $('#s-tools'), onChange: refresh });
     pv = createPlanViewer($('#spick'), {
-      imageURL: await db.blobURL(plan.blobId), pins: [], cover: 2.4,
-      onTap: (x, y) => { pin = { x, y }; refresh(); navigator.vibrate?.(15); },
+      imageURL: await db.blobURL(plan.blobId), pins: [], cover: 2.4, ...kit.viewerOpts,
+      onTap: (x, y) => { kit.point(x, y); navigator.vibrate?.(15); },
     });
+    kit.bind(pv);
     onCleanup(() => pv.destroy());
   } else $('#spick').outerHTML = '<div class="card muted small">Aucun plan pour ce projet (Réglages → Projets et plans).</div>';
   view.querySelector('.pick-grid').onclick = e => {
@@ -392,17 +550,192 @@ async function vStart(subId) {
   refresh();
   $('#go').onclick = async () => {
     $('#go').disabled = true;
-    const ids = [...chosen], zone = $('#s-zone').value.trim();
-    if (ids.length <= 1) { const insp = await createInspection(ids, pin, zone); location.replace('#/insp/' + insp.id); return; }
+    const ids = [...chosen], zone = $('#s-zone').value.trim(), pin = za.pin, area = za.area ? { ...za.area, name: zone || za.area.name } : null;
+    if (ids.length <= 1) { const insp = await createInspection(ids, pin, zone, null, area); location.replace('#/insp/' + insp.id); return; }
     // plusieurs entreprises → une tournée de N audits séparés (même zone, même date)
     const visitId = db.uid(); let first = null;
     for (const [k, id] of ids.entries()) {
       const p2 = pin ? { x: clamp01(pin.x + (k ? Math.cos(k * 2.1) * 0.025 : 0)), y: clamp01(pin.y + (k ? Math.sin(k * 2.1) * 0.025 : 0)) } : null;
-      const insp = await createInspection([id], p2, zone, visitId); first ||= insp;
+      const insp = await createInspection([id], p2, zone, visitId, area); first ||= insp;
     }
     toast(`${ids.length} audits créés`);
     location.replace('#/insp/' + first.id); // « retour » ne recrée pas d'audit
   };
+}
+/**
+ * Zone d'un audit sur le plan : toucher une zone du plan, toucher un point, ou tracer un rectangle.
+ * state = { pin, area, zone } (area = { name, pts, zoneId? }) ; onChange() après chaque changement.
+ * Ahmed peut ajouter la zone tracée aux zones du plan ; les autres HSE la gardent pour leur audit.
+ */
+function zoneKit({ plan, state, nameInput, toolsEl, onChange, color = () => '#F5C400' }) {
+  let pv = null;
+  const zones = () => (plan?.zones || []).filter(z => z.pts?.length > 2);
+  const areas = () => [
+    ...zones().filter(z => z.id !== state.area?.zoneId).map(z => ({ id: z.id, pts: z.pts, kind: 'zone', label: z.name })),
+    ...(state.area?.pts ? [{ id: 'sel', pts: state.area.pts, kind: 'sel', label: state.area.name || state.zone || 'Zone' }] : []),
+  ];
+  const draw = () => { pv?.setAreas(areas()); drawTools(); };
+  const select = (z, focus = false) => {
+    state.area = { zoneId: z.id, name: z.name, pts: z.pts }; state.zone = z.name; state.pin = centroid(z.pts);
+    if (nameInput) nameInput.value = z.name;
+    draw(); onChange?.('area'); if (focus) pv?.focusArea(z.pts); navigator.vibrate?.(15);
+  };
+  const drawTools = () => {
+    if (!toolsEl) return;
+    toolsEl.innerHTML = `<button type="button" class="btn ${drawing ? 'on' : ''}" data-zt="draw">${ic('edit', 18)} ${drawing ? 'Tracez sur le plan…' : 'Tracer une zone'}</button>
+      ${state.area || state.pin ? `<button type="button" class="btn" data-zt="clear">${ic('x', 18)} Effacer</button>` : ''}`;
+  };
+  let drawing = false, dead = false;
+  const stopDraw = () => { drawing = false; pv?.setDrawMode(false); drawTools(); };
+  const drawn = pts => {
+    stopDraw();
+    const admin = cloud.isAdmin();
+    openSheet(`<h3>Nouvelle zone</h3>
+      <label class="f" style="margin-top:0">Nom de la zone</label><input class="in" id="zn" value="${esc(nameInput?.value || state.zone || '')}" placeholder="ex. DCH2 nord, UTI 12…" autocomplete="off">
+      ${admin && plan ? `<label class="row check-line" style="margin-top:12px"><input type="checkbox" id="zsave" checked><span>Ajouter aux zones du plan (réutilisable par toute l’équipe)</span></label>` : ''}
+      <div class="btns" style="margin-top:14px"><button class="btn" data-close>Annuler</button><button class="btn primary" id="zok">Valider</button></div>`,
+    (el, close) => {
+      setTimeout(() => el.querySelector('#zn').focus(), 50);
+      el.querySelector('#zok').onclick = async () => {
+        const name = el.querySelector('#zn').value.trim();
+        let zoneId = null;
+        if (admin && plan && el.querySelector('#zsave')?.checked && name) {
+          zoneId = db.uid(); plan.zones = [...(plan.zones || []), { id: zoneId, name, pts }];
+          await db.put('plans', plan); toast('Zone ajoutée au plan');
+        }
+        state.area = { zoneId, name, pts }; state.zone = name; state.pin = centroid(pts);
+        if (nameInput) nameInput.value = name;
+        close(); draw(); onChange?.('area');
+      };
+    });
+  };
+  toolsEl?.addEventListener('click', e => {
+    const t = !dead && e.target.closest('[data-zt]')?.dataset.zt; if (!t) return;
+    if (t === 'draw') { if (drawing) return stopDraw(); drawing = true; pv?.setDrawMode(true, drawn); drawTools(); toast('Glissez le doigt sur le plan pour tracer la zone', 2500); }
+    if (t === 'clear') { state.area = null; state.pin = null; draw(); onChange?.('clear'); }
+  });
+  // nom tapé ou choisi dans la liste = zone du plan du même nom → elle s'allume sur le plan
+  nameInput?.addEventListener('change', () => {
+    if (dead) return;
+    const v = zoneKey(nameInput.value || ''); state.zone = nameInput.value.trim();
+    const z = zones().find(x => zoneKey(x.name) === v);
+    if (z && state.area?.zoneId !== z.id) select(z, true);
+    else if (state.area && !state.area.zoneId) { state.area.name = state.zone; draw(); onChange?.('name'); }
+  });
+  return {
+    viewerOpts: { areas: areas(), onZoneTap: a => { const z = zones().find(x => x.id === a.id); if (z) select(z); } },
+    bind(v) { pv = v; draw(); if (state.area?.pts) setTimeout(() => pv.focusArea(state.area.pts), 120); },
+    point(x, y) { state.pin = { x, y }; state.area = null; draw(); onChange?.('pin'); },
+    refresh: draw,
+    dispose() { dead = true; },
+  };
+}
+/** Ajouter une ou plusieurs entreprises à la tournée (même zone, même plan) : un audit séparé par entreprise */
+async function addCompaniesToVisit(insp, siblings, subs) {
+  const { subList } = await maps();
+  const already = new Set(siblings.flatMap(subIdsOf).concat(subIdsOf(insp)));
+  const list = subList.filter(s => !s.archived && !already.has(s.id)).sort((a, b) => a.name.localeCompare(b.name));
+  if (!list.length) return toast('Toutes les entreprises du projet sont déjà dans cette tournée');
+  const chosen = new Set();
+  openSheet(`<h3>Entreprises dans ${esc(insp.zone || 'cette zone')}</h3><p class="muted small" style="margin-top:-4px">Un audit et un score par entreprise.</p>
+    <div class="pick-grid">${list.map(s => `<button type="button" class="pick" data-s="${s.id}" style="--c:${esc(s.color)}"><span class="mono xs">${esc(abbr(s.name))}</span><span class="grow">${esc(s.name)}</span>${ic('check', 16)}</button>`).join('')}</div>
+    <button class="btn primary big" id="va-go" style="margin-top:14px" disabled>Choisissez au moins une entreprise</button>`,
+  (el, close) => {
+    const go = el.querySelector('#va-go');
+    el.querySelector('.pick-grid').onclick = e => {
+      const b = e.target.closest('[data-s]'); if (!b) return;
+      chosen.has(b.dataset.s) ? chosen.delete(b.dataset.s) : chosen.add(b.dataset.s); b.classList.toggle('on', chosen.has(b.dataset.s));
+      go.disabled = !chosen.size; go.textContent = chosen.size ? `Auditer ${chosen.size === 1 ? subs[[...chosen][0]].name : chosen.size + ' entreprises'}` : 'Choisissez au moins une entreprise';
+    };
+    go.onclick = async () => {
+      go.disabled = true;
+      if (!insp.visitId) { insp.visitId = db.uid(); await db.put('inspections', insp); }
+      const base = insp.pin, n0 = siblings.length || 1; let first = null;
+      for (const [k, sid] of [...chosen].entries()) {
+        const a = (n0 + k) * 2.1, p2 = base ? { x: clamp01(base.x + Math.cos(a) * 0.025), y: clamp01(base.y + Math.sin(a) * 0.025) } : null;
+        const ni = await createInspection([sid], p2, insp.zone || '', insp.visitId, insp.area ? { ...insp.area } : null);
+        if (insp.planId && ni.planId !== insp.planId) { ni.planId = insp.planId; await db.put('inspections', ni); }
+        first ||= ni;
+      }
+      close(); toast(chosen.size > 1 ? `${chosen.size} audits ajoutés à la tournée` : 'Audit ajouté à la tournée');
+      location.hash = '#/insp/' + first.id;
+    };
+  });
+}
+// ---------- bonnes pratiques (reconnaissance positive, en lien avec le bonus BE SAFE) ----------
+/** Ajouter / modifier une bonne pratique. critRef facultatif. Renvoie l'audit mis à jour, ou null. */
+function goodSheet(insp, { critRef = '', good = null, readOnly = false } = {}) {
+  return new Promise(resolve => {
+    const g = good ? { ...good, photos: [...(good.photos || [])] } : { id: db.uid(), critRef, text: critRef ? (insp.scores?.[critRef]?.c || '') : '', photos: [], createdAt: new Date().toISOString() };
+    const crit = g.critRef ? criterionOfRef(g.critRef) : null;
+    openSheet(`<h3>${ic('check', 20)} Bonne pratique</h3>
+      ${crit ? `<p class="muted small" style="margin-top:-6px">${esc(g.critRef)} · ${esc(crit.name)}</p>` : ''}
+      <label class="f" style="margin-top:0">Ce qui a été observé</label>
+      <textarea class="in" id="gtext" rows="3" placeholder="ex. Zone de levage parfaitement balisée, signaleur présent" ${readOnly ? 'disabled' : ''}>${esc(g.text)}</textarea>
+      <div class="thumbs" id="gthumbs"></div>
+      ${readOnly ? '' : `<div class="btns" style="margin-top:10px"><label class="btn" style="margin:0">${ic('camera')} Photo<input type="file" accept="image/*" capture="environment" class="hidden-input" id="gphoto"></label>
+        ${good ? `<button class="btn danger" id="gdel">${ic('trash', 18)} Supprimer</button>` : '<span></span>'}</div>
+      <button class="btn primary big good-btn" id="gok" style="margin-top:4px">Enregistrer la bonne pratique</button>`}`,
+    (el, close) => {
+      const draw = async () => { el.querySelector('#gthumbs').innerHTML = await thumbsHTML(g.photos); };
+      draw();
+      el.querySelector('#gphoto')?.addEventListener('change', async e => { g.photos.push(...await addPhotos(e.target.files)); e.target.value = ''; draw(); });
+      el.querySelector('#gthumbs').addEventListener('click', e => { const ph = e.target.closest('[data-photo]'); if (ph) photoViewer(ph.dataset.photo); });
+      el.querySelector('#gdel')?.addEventListener('click', async () => {
+        if (!await confirmBox('Supprimer cette bonne pratique ?', '')) return;
+        insp.goods = (insp.goods || []).filter(x => x.id !== g.id); await db.put('inspections', insp); close(); resolve(insp);
+      });
+      el.querySelector('#gok')?.addEventListener('click', async () => {
+        g.text = el.querySelector('#gtext').value.trim();
+        if (!g.text && !g.photos.length) return toast('Décrivez ce qui a été observé');
+        insp.goods = [...(insp.goods || []).filter(x => x.id !== g.id), g];
+        await db.put('inspections', insp); close(); navigator.vibrate?.(15); toast('Bonne pratique enregistrée'); resolve(insp);
+      });
+    });
+  });
+}
+function goodCard(g) {
+  const crit = g.critRef ? criterionOfRef(g.critRef) : null;
+  return `<button type="button" class="card good-card" data-good="${g.id}"><span class="good-ic">${ic('check', 18)}</span>
+    <span class="grow"><b>${esc(g.text || 'Bonne pratique')}</b>${crit ? `<span class="muted small">${esc(g.critRef)} · ${esc(crit.name)}</span>` : ''}</span>
+    ${(g.photos || []).length ? `<span class="good-ph">${ic('camera', 16)} ${g.photos.length}</span>` : ''}</button>`;
+}
+
+// ---------- signature du responsable de l'entreprise en fin d'audit ----------
+function signatureSheet(insp, subs) {
+  return new Promise(resolve => {
+    const sub = subIdsOf(insp).length === 1 ? subs[insp.subId] : null;
+    openSheet(`<h3>Signature</h3><p class="muted small" style="margin-top:-6px">Le responsable ${sub ? 'de ' + esc(sub.name) + ' ' : ''}confirme avoir pris connaissance des constats et des actions.</p>
+      <div class="btns" style="margin:0"><div><label class="f" style="margin-top:0">Nom</label><input class="in" id="sgn" value="${esc(insp.signature?.name || '')}" autocomplete="name"></div>
+      <div><label class="f" style="margin-top:0">Fonction</label><input class="in" id="sgr" value="${esc(insp.signature?.role || 'Chef d’équipe')}"></div></div>
+      <label class="f">Signez dans le cadre</label>
+      <canvas class="sig-pad" id="sgc"></canvas>
+      <div class="btns" style="margin-top:10px"><button class="btn" id="sgx">Effacer</button><button class="btn primary" id="sgok">Valider la signature</button></div>`,
+    (el, close) => {
+      const cv = el.querySelector('#sgc'), r = cv.getBoundingClientRect(), dpr = Math.min(2, window.devicePixelRatio || 1);
+      cv.width = r.width * dpr; cv.height = r.height * dpr;
+      const g = cv.getContext('2d'); g.scale(dpr, dpr); g.lineWidth = 2.6; g.lineCap = 'round'; g.lineJoin = 'round'; g.strokeStyle = '#0A1322';
+      let drawing = false, inked = false, last = null;
+      const pt = e => { const b = cv.getBoundingClientRect(); return { x: e.clientX - b.left, y: e.clientY - b.top }; };
+      cv.addEventListener('pointerdown', e => { e.preventDefault(); cv.setPointerCapture(e.pointerId); drawing = true; last = pt(e); });
+      cv.addEventListener('pointermove', e => { if (!drawing) return; const p = pt(e); g.beginPath(); g.moveTo(last.x, last.y); g.lineTo(p.x, p.y); g.stroke(); last = p; inked = true; });
+      const up = () => { drawing = false; }; cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
+      el.querySelector('#sgx').onclick = () => { g.clearRect(0, 0, cv.width, cv.height); inked = false; };
+      el.querySelector('#sgok').onclick = async () => {
+        const name = el.querySelector('#sgn').value.trim();
+        if (!name) return toast('Indiquez le nom du signataire');
+        if (!inked) return toast('Signez dans le cadre');
+        // fond blanc pour le PDF
+        const out = document.createElement('canvas'); out.width = cv.width; out.height = cv.height;
+        const o = out.getContext('2d'); o.fillStyle = '#fff'; o.fillRect(0, 0, out.width, out.height); o.drawImage(cv, 0, 0);
+        const blob = await new Promise(rs => out.toBlob(rs, 'image/jpeg', 0.9));
+        const old = insp.signature?.blobId;
+        insp.signature = { name, role: el.querySelector('#sgr').value.trim(), date: new Date().toISOString(), blobId: await db.putBlob(blob) };
+        await db.put('inspections', insp); if (old) db.deleteBlob(old).catch(() => {});
+        close(); toast('Signature enregistrée'); resolve(insp);
+      };
+    });
+  });
 }
 /** Abréviation affichée dans les épingles : 3 premières lettres */
 const abbr = name => (name || '?').replace(/[^A-Za-z0-9]/g, '').slice(0, 3).toUpperCase();
@@ -426,6 +759,49 @@ function inspCard(i, subs) {
       ${i.pin || i.zone ? `<div class="insp-loc">${ic('pin', 14)} ${esc(i.zone || 'Localisé sur le plan')}</div>` : ''}
     </div>
     ${o.pct === null ? '<span class="badge none">—</span>' : badge(o.pct)}</a>`;
+}
+// ---------- choix de la zone : liste propre, triée, regroupée par secteur ----------
+const ZONE_GROUPS = [['DCH', /^dch/i], ['FSA', /^fsa/i], ['MYD', /^myd/i], ['EYD', /^eyd/i], ['Utilités (UTI)', /^(uti|utilit|zone 17)/i], ['Toitures', /^roof/i], ['SB', /^sb\d/i], ['Tranchées', /trench/i], ['Axes / D', /^(axis|d\d)/i]];
+const zoneKey = z => z.toLowerCase().replace(/^(on the |the )/, '').replace(/^roof of (the )?/, 'roof ').replace(/\s+/g, ' ').trim();
+const natural = (a, b) => a.localeCompare(b, 'fr', { numeric: true, sensitivity: 'base' });
+async function zoneOptions() {
+  const used = (await pAll('inspections')).sort((a, b) => (b.date + (b.updatedAt || '')).localeCompare(a.date + (a.updatedAt || ''))).map(i => (i.zone || '').trim()).filter(Boolean);
+  const all = new Map();
+  [...used, ...SEED_LOCATIONS].forEach(z => { z = String(z).trim(); if (!z || /^\d+(\.\d+)?$/.test(z)) return; const k = zoneKey(z); if (!all.has(k)) all.set(k, z.charAt(0).toUpperCase() + z.slice(1)); });
+  const recent = [...new Map(used.map(z => [zoneKey(z), z])).values()].slice(0, 6);
+  return { list: [...all.values()].sort(natural), recent };
+}
+async function zonePicker(input, plan = null) {
+  if (!input) return;
+  const { list, recent } = await zoneOptions();
+  const planZones = [...new Set((plan?.zones || []).map(z => z.name).filter(Boolean))].sort(natural);
+  const panel = document.createElement('div'); panel.className = 'zone-panel'; panel.hidden = true;
+  input.after(panel);
+  const chip = z => `<button type="button" data-z="${esc(z)}">${esc(z)}</button>`;
+  const draw = () => {
+    const q = zoneKey(input.value);
+    if (q) {
+      const hits = [...new Set([...planZones, ...list])].filter(z => zoneKey(z).includes(q)).slice(0, 40);
+      panel.innerHTML = hits.length ? `<div class="zp-chips">${hits.map(chip).join('')}</div>` : `<p class="muted small">Nouvelle zone : « ${esc(input.value.trim())} »</p>`;
+      return;
+    }
+    const groups = ZONE_GROUPS.map(([label, re]) => [label, list.filter(z => re.test(z))]);
+    const placed = new Set(groups.flatMap(([, l]) => l));
+    groups.push(['Autres', list.filter(z => !placed.has(z))]);
+    panel.innerHTML = (planZones.length ? `<div class="zp-group"><b>Zones du plan</b><div class="zp-chips">${planZones.map(chip).join('')}</div></div>` : '') + (recent.length ? `<div class="zp-group"><b>Récentes</b><div class="zp-chips">${recent.map(chip).join('')}</div></div>` : '') +
+      groups.filter(([, l]) => l.length).map(([label, l]) => `<div class="zp-group"><b>${esc(label)}</b><div class="zp-chips">${l.map(chip).join('')}</div></div>`).join('');
+  };
+  const open = () => { draw(); panel.hidden = false; };
+  input.addEventListener('focus', open);
+  input.addEventListener('input', () => { if (!panel.hidden) draw(); else open(); });
+  input.addEventListener('blur', () => setTimeout(() => { panel.hidden = true; }, 150));
+  input.addEventListener('keydown', e => { if (e.key === 'Escape' || e.key === 'Enter') { panel.hidden = true; if (e.key === 'Enter') input.blur(); } });
+  panel.addEventListener('pointerdown', e => e.preventDefault()); // garde le clavier ouvert pendant le choix
+  panel.addEventListener('click', e => {
+    const b = e.target.closest('[data-z]'); if (!b) return;
+    input.value = b.dataset.z; input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true }));
+    panel.hidden = true; input.blur(); navigator.vibrate?.(10);
+  });
 }
 /** Liste d'audits : ceux d'une même tournée (lancés ensemble) sont regroupés dans un seul bloc */
 function inspList(list, subs) {
@@ -470,10 +846,10 @@ async function inspForm(state, { live }) {
   state.subIds = [...subIdsOf(state)];
   if (!state.planId && planList.length) state.planId = planList[0].id;
   view.innerHTML = `
-    <label class="f" style="margin-top:4px">Zone — touchez le plan pour poser l’épingle</label>
+    <label class="f" style="margin-top:4px">Zone — touchez une zone, un point, ou tracez la zone</label>
     <div id="pick" class="pv plan-box"></div>
-    <input class="in" id="f-zone" list="zones" placeholder="Zone (ex. Roof DCH4, UTI 11, FSA C…)" value="${esc(state.zone || '')}" style="margin-top:8px">
-    <datalist id="zones">${SEED_LOCATIONS.map(l => `<option value="${esc(l)}">`).join('')}</datalist>
+    <div class="plan-tools" id="f-tools"></div>
+    <input class="in" id="f-zone" autocomplete="off" placeholder="Zone (ex. Roof DCH4, UTI 11, FSA C…)" value="${esc(state.zone || '')}" style="margin-top:8px">
     <label class="f">Entreprise auditée</label>
     <div class="pick-grid" id="f-subs">${subsActive.map(s => `<button type="button" class="pick ${subIdsOf(state).includes(s.id) ? 'on' : ''}" data-s="${s.id}" style="--c:${esc(s.color)}"><span class="mono xs">${esc(abbr(s.name))}</span><span class="grow">${esc(s.name)}</span>${ic('check', 16)}</button>`).join('')}</div>
     ${planList.length > 1 ? `<label class="f">Plan</label><select class="in" id="f-plan">${planList.map(p => `<option value="${p.id}" ${p.id === state.planId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
@@ -483,22 +859,26 @@ async function inspForm(state, { live }) {
     <div id="form-foot" style="margin-top:16px"></div>`;
   view.querySelectorAll('[data-logo]').forEach(async im => { im.src = await db.blobURL(im.dataset.logo); });
 
-  let pv = null;
+  let pv = null, kit = null;
   const mountPlan = async () => {
-    pv?.destroy();
+    pv?.destroy(); kit?.dispose();
     const plan = plans[state.planId];
     const box = $('#pick');
-    if (!plan) { box.innerHTML = '<div class="empty">Aucun plan</div>'; return; }
-    const sub = state.subIds.length === 1 ? subList.find(s => s.id === state.subIds[0]) : null;
+    if (!plan) { box.innerHTML = '<div class="empty">Aucun plan</div>'; $('#f-tools').innerHTML = ''; return; }
+    const sub = () => state.subIds.length === 1 ? subList.find(s => s.id === state.subIds[0]) : null;
+    const pinsNow = () => state.pin && !state.area ? [{ id: 'p', ...state.pin, color: sub()?.color || '#0B2D5B', label: '', ghost: true }] : [];
+    const tools = $('#f-tools').cloneNode(false); $('#f-tools').replaceWith(tools);
+    kit = zoneKit({ plan, state, nameInput: $('#f-zone'), toolsEl: tools, onChange: k => { pv?.setPins(pinsNow()); live?.(k === 'name' ? 'zone' : 'pin'); } });
     pv = createPlanViewer(box, {
-      imageURL: await db.blobURL(plan.blobId),
-      pins: state.pin ? [{ id: 'p', ...state.pin, color: sub?.color, label: '', ghost: true }] : [], cover: 2.4,
-      focus: state.pin || null,
-      onTap: (x, y) => { state.pin = { x, y }; pv.setPins([{ id: 'p', x, y, color: sub?.color || '#0B2D5B', label: '', ghost: true }]); live?.('pin'); },
+      imageURL: await db.blobURL(plan.blobId), pins: pinsNow(), cover: 2.4, ...kit.viewerOpts,
+      focus: state.area ? null : state.pin || null,
+      onTap: (x, y) => kit.point(x, y),
     });
+    kit.bind(pv);
     onCleanup(() => pv?.destroy());
   };
   await mountPlan();
+  zonePicker($('#f-zone'), plans[state.planId]);
 
   $('#f-subs').onclick = e => {
     const b = e.target.closest('[data-s]'); if (!b) return;
@@ -506,7 +886,7 @@ async function inspForm(state, { live }) {
     state.subIds = state.subIds[0] === b.dataset.s ? [] : [b.dataset.s]; state.subId = state.subIds[0] || null;
     $('#f-subs').querySelectorAll('[data-s]').forEach(x => x.classList.toggle('on', state.subIds.includes(x.dataset.s))); live?.('sub');
   };
-  if ($('#f-plan')) $('#f-plan').onchange = e => { state.planId = e.target.value; state.pin = null; mountPlan(); live?.('plan'); };
+  if ($('#f-plan')) $('#f-plan').onchange = e => { state.planId = e.target.value; state.pin = null; state.area = null; mountPlan(); live?.('plan'); };
   const bind = (sel, key) => { $(sel).addEventListener('input', e => { state[key] = e.target.value; live?.(key); }); };
   bind('#f-zone', 'zone'); bind('#f-insp', 'inspectors'); bind('#f-date', 'date'); bind('#f-site', 'site');
   return { plans };
@@ -547,7 +927,7 @@ async function vInspEdit(id) {
 async function deleteInspection(id) {
   const insp = await db.get('inspections', id);
   const acts = await db.byIndex('actions', 'inspectionId', id);
-  const photos = [...Object.values(insp?.scores || {}).flatMap(s => s?.photos || []), ...acts.flatMap(a => [...(a.photos || []), ...(a.photosAfter || [])])];
+  const photos = [...Object.values(insp?.scores || {}).flatMap(s => s?.photos || []), ...(insp?.goods || []).flatMap(g => g.photos || []), insp?.signature?.blobId, ...acts.flatMap(a => [...(a.photos || []), ...(a.photosAfter || [])])].filter(Boolean);
   for (const a of acts) await db.remove('actions', a.id);
   await db.remove('inspections', id);
   for (const p of photos) await db.deleteBlob(p).catch(() => {});
@@ -592,14 +972,19 @@ async function vInsp(id) {
   const visitBar = siblings.length > 1 ? `<div class="visit-bar"><span class="muted small">Tournée · ${siblings.length} audits</span><div class="visit-chips">${siblings.map(v => {
     const vo = overallScore(v.scores, v.bonus, v.penalty), vs = subs[v.subId];
     return `<a href="#/insp/${v.id}" class="vchip ${v.id === id ? 'on' : ''}" style="--c:${esc(vs?.color || '#9E9E9E')}"><span class="mono xs">${esc(abbr(vs?.name))}</span>${esc(vs?.name || 'Zone')}<em>${vo.pct === null ? '—' : Math.round(vo.pct * 100) + '%'}</em></a>`;
-  }).join('')}</div></div>` : '';
+  }).join('')}${cloud.can('audit') ? `<button type="button" class="vchip vadd" id="v-add">${ic('plus', 16)} Entreprise</button>` : ''}</div></div>` : '';
+  const isZone = subIdsOf(insp).length === 0;
+  // audit de zone (seul) : on peut y ajouter les entreprises rencontrées
+  const zoneAdd = isZone && siblings.length <= 1 && cloud.can('audit') ? `<button type="button" class="card link row zone-add" id="v-add">
+      <span class="ic-round">${ic('plus')}</span><span class="grow"><b>Auditer une entreprise dans cette zone</b><span class="muted small">Une ou plusieurs — un audit et un score par entreprise, dans la même tournée</span></span>${ic('chevron')}</button>` : '';
+  const teamActs = subIdsOf(insp).length === 1 ? await teamOpenActions(insp.subId) : [];
   const prev = await lastAudit(insp);
   const prevPct = prev ? overallScore(prev.scores, prev.bonus, prev.penalty).pct : null;
   const draw = () => {
     const o = overallScore(insp.scores, insp.bonus, insp.penalty);
     const done = o.themes.reduce((a, t) => a + t.done, 0);
     const next = o.themes.find(t => t.done < t.total);
-    view.innerHTML = visitBar + `
+    view.innerHTML = visitBar + zoneAdd + `
       <div class="card score-card">
         <div><div class="score-big" style="color:${o.pct === null ? 'var(--muted)' : o.rating.color}">${o.pct === null ? '—' : Math.round(o.pct * 100) + '<small>%</small>'}</div>
           ${o.pct === null ? '<span class="muted small">Pas encore noté</span>' : ratingChip(o.pct)}</div>
@@ -625,8 +1010,25 @@ async function vInsp(id) {
             <span class="grow"><b>${esc(t.theme.name)}</b><span class="muted small">${allNA ? 'Non applicable' : `${t.done} / ${t.total}`}</span></span>
             ${allNA ? '<span class="badge none">N/A</span>' : t.done ? badge(t.pct) : '<span class="badge none">—</span>'}</a>
           <button class="na-btn ${allNA ? 'on' : ''}" data-na="${t.theme.ref}" aria-label="Thème non applicable">N/A</button></div>`;
-      }).join('')}`;
+      }).join('')}
+      <div class="section-head"><span>Bonnes pratiques</span><span class="muted small">${(insp.goods || []).length || ''}</span></div>
+      ${(insp.goods || []).map(goodCard).join('')}
+      <button class="btn block good-add" id="g-add">${ic('plus', 18)} Ajouter une bonne pratique</button>
+      ${subIdsOf(insp).length === 1 ? `<div class="section-head"><span>Fin d’audit</span></div>
+      <div class="card sig-card">${insp.signature ? `<div class="row"><img class="sig-img" data-sigimg="${insp.signature.blobId}" alt="signature"><span class="grow"><b>${esc(insp.signature.name)}</b><span class="muted small">${esc(insp.signature.role || '')} · signé le ${dateFR(insp.signature.date.slice(0, 10))}</span></span></div>
+        <button class="btn block" id="sig" style="margin-top:10px">Refaire la signature</button>` : `<b>Faire signer le responsable de ${esc(subs[insp.subId]?.name || 'l’entreprise')}</b><span class="muted small">Facultatif — la signature apparaît dans le rapport PDF.</span>
+        <button class="btn block" id="sig" style="margin-top:10px">${ic('edit', 18)} Signer sur l’écran</button>`}</div>` : ''}`;
     if ($('#exp')) $('#exp').onclick = () => exportSheet([insp]);
+    $('#v-add')?.addEventListener('click', () => addCompaniesToVisit(insp, siblings, subs));
+    $('#g-add')?.addEventListener('click', async () => { if (await goodSheet(insp)) draw(); });
+    view.querySelectorAll('[data-good]').forEach(b => b.onclick = async () => { if (await goodSheet(insp, { good: (insp.goods || []).find(g => g.id === b.dataset.good) })) draw(); });
+    $('#sig')?.addEventListener('click', async () => { if (await signatureSheet(insp, subs)) draw(); });
+    view.querySelectorAll('[data-sigimg]').forEach(async im => { im.src = await db.blobURL(im.dataset.sigimg); });
+    // actions encore ouvertes chez cette entreprise, signalées par d'autres HSE : à vérifier sur place
+    const themesHead = [...view.querySelectorAll('.section-head')].find(h => /Thèmes/.test(h.textContent));
+    if (teamActs.length) (themesHead || view).insertAdjacentHTML(themesHead ? 'beforebegin' : 'beforeend', `<div class="section-head"><span>À vérifier · signalé par l’équipe</span><span class="muted small">${teamActs.length}</span></div>
+      <p class="muted small" style="margin:-4px 2px 8px">Actions encore ouvertes chez ${esc(subs[insp.subId]?.name || '')}, relevées par d’autres HSE.</p>
+      ${teamActs.slice(0, 6).map(a => actionCard(a, subs)).join('')}`);
   };
   draw();
   view.addEventListener('click', async e => {
@@ -675,7 +1077,7 @@ async function vTheme(id, ref) {
         <div class="crit-tools">
           <label class="btn" style="margin:0">${ic('camera')} Photo<input type="file" accept="image/*" capture="environment" class="hidden-input" data-photo-in multiple></label>
           ${cloud.can('actions') ? `<button class="btn" data-act>${ic('plus')} Action${n ? ` (${n})` : ''}</button>` : '<span></span>'}</div>
-        <div class="thumbs" data-thumbs></div></div>`;
+        <div class="thumbs" data-thumbs></div><div class="good-slot" data-gs></div></div>`;
     }).join('')}
     <p class="muted small swipe-hint">Glissez à gauche ou à droite pour changer de thème</p>
     <div class="btns">
@@ -689,8 +1091,14 @@ async function vTheme(id, ref) {
       ${t.done === 0 ? '<span class="badge none">—</span>' : badge(t.pct)}`;
   };
   const drawThumbs = async card => { card.querySelector('[data-thumbs]').innerHTML = await thumbsHTML(insp.scores[card.dataset.ref]?.photos); };
+  // note 5 : proposer de la noter comme bonne pratique (reconnaissance positive)
+  const drawGood = card => {
+    const ref = card.dataset.ref, g = (insp.goods || []).find(x => x.critRef === ref), v = insp.scores[ref]?.v;
+    card.querySelector('[data-gs]').innerHTML = g ? `<button type="button" class="good-chip" data-goodedit>${ic('check', 16)} Bonne pratique : ${esc(g.text || 'voir')}</button>`
+      : v === 5 ? `<button type="button" class="good-link" data-goodnew>${ic('plus', 16)} Noter comme bonne pratique</button>` : '';
+  };
   drawScore();
-  view.querySelectorAll('.crit').forEach(drawThumbs);
+  view.querySelectorAll('.crit').forEach(c => { drawThumbs(c); drawGood(c); });
 
   view.addEventListener('click', async e => {
     const card = e.target.closest('.crit'); if (!card) return;
@@ -702,7 +1110,7 @@ async function vTheme(id, ref) {
       s.v = s.v === v ? null : v;
       card.querySelectorAll('[data-v]').forEach(b => b.classList.toggle('on', b === vb && s.v !== null));
       navigator.vibrate?.(15);
-      save.flush(); drawScore();
+      save.flush(); drawScore(); drawGood(card);
       // passage automatique au critère suivant
       if (s.v !== null && !(typeof s.v === 'number' && s.v <= 2)) {
         const next = card.nextElementSibling;
@@ -718,6 +1126,11 @@ async function vTheme(id, ref) {
       }
       return;
     }
+    if (e.target.closest('[data-goodnew], [data-goodedit]')) {
+      save.flush();
+      await goodSheet(insp, { critRef: cref, good: (insp.goods || []).find(x => x.critRef === cref) || null });
+      drawGood(card); return;
+    }
     if (e.target.closest('[data-act]')) {
       const s = sc(cref);
       const a = await createAction(insp, { subId: await chooseCompany(insp, (await maps()).subs), critRef: cref, observation: s.c || '', priority: typeof s.v === 'number' && s.v <= 1 ? 'High' : 'Medium' });
@@ -726,6 +1139,8 @@ async function vTheme(id, ref) {
     const ph = e.target.closest('[data-photo]');
     if (ph) photoViewer(ph.dataset.photo, async () => {
       const s = sc(cref); s.photos = s.photos.filter(p => p !== ph.dataset.photo); await db.deleteBlob(ph.dataset.photo); save.flush(); drawThumbs(card);
+    }, async nid => {
+      const s = sc(cref), old = ph.dataset.photo; s.photos = s.photos.map(p => p === old ? nid : p); save.flush(); drawThumbs(card); db.deleteBlob(old).catch(() => {});
     });
   });
   // glisser à gauche / à droite : thème suivant / précédent
@@ -750,7 +1165,7 @@ async function vTheme(id, ref) {
     toast('Compression des photos…');
     const ids = await addPhotos(e.target.files);
     const s = sc(card.dataset.ref); s.photos = [...(s.photos || []), ...ids];
-    save.flush(); drawThumbs(card); e.target.value = ''; toast(`${ids.length} photo(s) ajoutée(s)`);
+    save.flush(); drawThumbs(card); e.target.value = ''; toast(ids.length > 1 ? `${ids.length} photos ajoutées — touchez-en une pour l’annoter` : 'Photo ajoutée — touchez-la pour l’annoter', 3000);
   });
 }
 
@@ -779,10 +1194,14 @@ async function vSummary(id) {
     $('#sum-out').innerHTML = `
       <div class="overall" style="background:${o.rating.color};color:${o.rating.fg}"><div>Score global</div><b>${fmtPct(o.pct)}</b><span>${o.pct === null ? 'Pas encore noté' : o.rating.name}</span>
         <div class="small">${o.countedThemes}/19 thèmes notés</div></div>
-      ${barChart(o.themes)}
-      <table class="t" style="margin-top:12px"><tr><th>Theme</th><th class="r">Score %</th><th>Rating</th></tr>
-      ${o.themes.map(t => `<tr><td><a href="#/insp/${id}/t/${t.theme.ref}">${t.theme.ref} ${esc(t.theme.name)}</a></td><td class="r">${fmtPct(t.pct)}</td><td>${ratingChip(t.pct)}</td></tr>`).join('')}
-      <tr><th>Score global</th><th class="r">${fmtPct(o.pct)}</th><th>${ratingChip(o.pct)}</th></tr></table>`;
+      <div class="sum-list">${o.themes.map(t => {
+        const w = t.pct === null ? 0 : Math.round(t.pct * 100), r = rating(t.pct);
+        return `<a class="sum-row" href="#/insp/${id}/t/${t.theme.ref}">
+          <span class="sum-n">${t.theme.ref.replace('.0', '')}</span>
+          <span class="sum-main"><b>${esc(t.theme.name)}</b>
+            <span class="sum-bar">${t.pct === null ? '' : `<i style="width:${w}%;background:${r.color}"></i>`}</span></span>
+          ${t.pct === null ? `<span class="sum-na">${t.total && t.done === t.total ? 'N/A' : '—'}</span>` : `<span class="badge" style="background:${r.color};color:${r.fg}">${w}%</span>`}</a>`;
+      }).join('')}</div>`;
   };
   draw();
   view.addEventListener('input', e => {
@@ -793,23 +1212,13 @@ async function vSummary(id) {
   if ($('#exp')) $('#exp').onclick = () => exportSheet([insp]);
 }
 
-function barChart(themes) {
-  const rowH = 24, labW = 44, w = 340, H = themes.length * rowH + 24;
-  const x = p => labW + p * (w - labW - 44);
-  return `<svg viewBox="0 0 ${w} ${H}" style="width:100%;background:var(--surface);border-radius:14px;border:2px solid var(--line)" role="img" aria-label="Score par thème">
-    ${[0.5, 0.7, 0.8, 0.9, 1].map(t => `<line x1="${x(t)}" x2="${x(t)}" y1="6" y2="${H - 16}" stroke="var(--line)" stroke-dasharray="3 3"/><text x="${x(t)}" y="${H - 4}" font-size="9" text-anchor="middle">${t * 100}</text>`).join('')}
-    ${themes.map((t, i) => { const y = 8 + i * rowH; const r = rating(t.pct);
-      return `<text x="4" y="${y + 13}" font-size="11" font-weight="700">${t.theme.ref}</text>
-        ${t.pct === null ? `<text x="${labW + 4}" y="${y + 13}" font-size="10" opacity=".6">N/A</text>` : `<rect x="${labW}" y="${y + 2}" width="${Math.max(2, x(t.pct) - labW)}" height="${rowH - 8}" rx="3" fill="${r.color}"/><text x="${x(t.pct) + 4}" y="${y + 13}" font-size="10">${Math.round(t.pct * 100)}%</text>`}`; }).join('')}
-  </svg>`;
-}
 
 // ---------- export ----------
 function exportSheet(insps, opts = {}) {
   const name = insps.length === 1 ? insps[0].ref : `PRT-export-${todayISO()}`;
   openSheet(`<h3>Exporter ${insps.length === 1 ? esc(insps[0].ref) : insps.length + ' inspections'}</h3>
     <div style="display:grid;gap:10px">
-      <button class="btn block primary" data-x="xlsx">Excel (.xlsx) — 4 feuilles PRT</button>
+      <button class="btn block primary" data-x="xlsx">${insps.length === 1 ? 'Excel — fichier PRT d’origine rempli' : 'Excel (.xlsx) — 4 feuilles PRT'}</button>
       ${insps.length === 1 ? '<button class="btn block primary" data-x="pdf">Rapport PDF — personnaliser puis générer</button>' : ''}
       <button class="btn block" data-close>Annuler</button></div>`,
     (el, close) => el.addEventListener('click', async e => {
@@ -1053,7 +1462,8 @@ async function vAction(id) {
     <button class="btn danger block" id="del" style="margin-top:20px">${ic('trash')} Supprimer l’action</button>
     <p class="muted small" style="text-align:center">Enregistrement automatique</p>`;
 
-  if (!cloud.can('actions')) { // lecture seule
+  if (!isMine(a)) view.insertAdjacentHTML('afterbegin', `<div class="card muted small ro-note">${ic('check', 16)} Action relevée par un autre HSE — consultation seule.</div>`);
+  if (!cloud.can('actions') || !isMine(a)) { // lecture seule (droits, ou action d'un autre HSE)
     view.querySelectorAll('input, textarea, select, .seg button').forEach(el => { el.disabled = true; });
     ['#del', '#mv'].forEach(sel => view.querySelector(sel)?.remove());
     view.querySelectorAll('label.btn').forEach(el => el.remove());
@@ -1062,7 +1472,8 @@ async function vAction(id) {
   drawThumbs();
   const addAfter = async files => { toast('Compression…'); a.photosAfter = [...(a.photosAfter || []), ...await addPhotos(files)]; save.flush(); drawThumbs(); toast('Photo après correction ajoutée'); };
   let shareFiles = [];
-  actionFiles(a).then(f => { shareFiles = f; });
+  const sharePh = (await getSettings()).sharePhotos !== false;
+  if (sharePh) actionFiles(a).then(f => { shareFiles = f; });
   $('#a-send').onclick = () => shareAction(a, subs, shareFiles);
   view.addEventListener('input', e => {
     const k = e.target.dataset.k; if (!k) return;
@@ -1073,11 +1484,11 @@ async function vAction(id) {
     if (e.target.id === 'a-after') { await addAfter(e.target.files); e.target.value = ''; return; }
     if (e.target.id !== 'a-photo') return;
     toast('Compression…'); a.photos = [...(a.photos || []), ...await addPhotos(e.target.files)]; save.flush(); drawThumbs(); e.target.value = '';
-    actionFiles(a).then(f => { shareFiles = f; });
+    if (sharePh) actionFiles(a).then(f => { shareFiles = f; });
   });
   view.addEventListener('click', async e => {
     const sb = e.target.closest('[data-seg] [data-val]');
-    if (sb) {
+    if (sb && !sb.disabled) {
       const key = sb.closest('[data-seg]').dataset.seg;
       a[key] = sb.dataset.val;
       sb.parentElement.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === sb));
@@ -1089,9 +1500,13 @@ async function vAction(id) {
       return;
     }
     const ph = e.target.closest('[data-photo]');
-    if (ph) photoViewer(ph.dataset.photo, async () => { a.photos = (a.photos || []).filter(p => p !== ph.dataset.photo); a.photosAfter = (a.photosAfter || []).filter(p => p !== ph.dataset.photo); await db.deleteBlob(ph.dataset.photo); save.flush(); drawThumbs(); });
+    if (ph) photoViewer(ph.dataset.photo, readOnly ? null : async () => { a.photos = (a.photos || []).filter(p => p !== ph.dataset.photo); a.photosAfter = (a.photosAfter || []).filter(p => p !== ph.dataset.photo); await db.deleteBlob(ph.dataset.photo); save.flush(); drawThumbs(); }, readOnly ? null : async nid => {
+      const old = ph.dataset.photo; a.photos = (a.photos || []).map(p => p === old ? nid : p); a.photosAfter = (a.photosAfter || []).map(p => p === old ? nid : p);
+      save.flush(); drawThumbs(); if (sharePh) actionFiles(a).then(f => { shareFiles = f; }); db.deleteBlob(old).catch(() => {});
+    });
   });
-  $('#del').onclick = async () => { if (await confirmBox('Supprimer cette action ?', '')) { await db.remove('actions', id); history.back(); } };
+  const readOnly = !cloud.can('actions') || !isMine(a);
+  if ($('#del')) $('#del').onclick = async () => { if (await confirmBox('Supprimer cette action ?', '')) { await db.remove('actions', id); history.back(); } };
 
   if (a.planId && plans[a.planId]) {
     let moving = false;
@@ -1102,7 +1517,7 @@ async function vAction(id) {
       onTap: (x, y) => { if (!moving) return; a.pin = { x, y }; moving = false; $('#mv').textContent = 'Déplacer l’épingle'; $('#mv').classList.remove('primary'); pv.setPins(pins()); save.flush(); toast('Épingle déplacée'); },
     });
     onCleanup(() => pv.destroy());
-    $('#mv').onclick = e => { moving = !moving; e.target.textContent = moving ? 'Tapez l’emplacement sur le plan…' : (a.pin ? 'Déplacer l’épingle' : 'Placer l’épingle'); e.target.classList.toggle('primary', moving); pv.setPins(pins()); };
+    if ($('#mv')) $('#mv').onclick = e => { moving = !moving; e.target.textContent = moving ? 'Tapez l’emplacement sur le plan…' : (a.pin ? 'Déplacer l’épingle' : 'Placer l’épingle'); e.target.classList.toggle('primary', moving); pv.setPins(pins()); };
   }
 }
 
@@ -1115,8 +1530,9 @@ async function vMap(q) {
   if (!planList.length) { view.classList.remove('full', 'map-page'); view.innerHTML = `<div class="empty">Aucun plan.<br><br><a class="btn primary" href="#/plans">Importer un plan</a></div>`; return; }
   const planId = q.get('plan') && plans[q.get('plan')] ? q.get('plan') : (plans[await db.getMeta('lastPlan')] ? await db.getMeta('lastPlan') : planList[0].id);
   await db.setMeta('lastPlan', planId);
-  const onlyInsp = q.get('insp');
+  const onlyInsp = q.get('insp'), onlyTeam = q.get('team');
   const [insps, acts] = await Promise.all([pAll('inspections'), pAll('actions')]);
+  const team = cloud.can('team') ? (await cloud.teamAudits()).filter(a => (!PROJECT || a.projectId === PROJECT.id)) : [];
   const active = subList.filter(s => !s.archived).sort((a, b) => a.name.localeCompare(b.name));
   view.innerHTML = `
     <div class="chips-bar">
@@ -1130,14 +1546,29 @@ async function vMap(q) {
     const out = [];
     insps.filter(i => i.planId === planId && i.pin && (!mapSub || hasSub(i, mapSub)) && (!onlyInsp || i.id === onlyInsp))
       .forEach(i => out.push({ id: 'i:' + i.id, ...i.pin, color: auditColor(i, subs), label: auditAbbr(i, subs) }));
+    team.filter(a => a.planId === planId && a.pin && (!mapSub || (a.subIds || []).includes(mapSub)) && (!onlyInsp || a.id === onlyTeam) && (!onlyTeam || a.id === onlyTeam))
+      .forEach(a => out.push({ id: 't:' + a.id, ...a.pin, color: teamColor(a, subs), label: (a.subIds || []).length === 1 ? abbr(subs[a.subIds[0]]?.name) : 'ZON', ghost: true }));
     if (mapActions || onlyInsp) acts.filter(a => a.planId === planId && a.pin && a.status !== 'Closed' && (!mapSub || a.subId === mapSub) && (!onlyInsp || a.inspectionId === onlyInsp))
       .forEach(a => out.push({ id: 'a:' + a.id, ...a.pin, color: subs[a.subId]?.color, label: '!', kind: 'action' }));
     return out;
   };
+  // une zone partagée par plusieurs audits (tournée) n'est dessinée qu'une fois ; les épingles montrent les entreprises
+  const computeAreas = () => {
+    const groups = new Map();
+    insps.filter(i => i.planId === planId && i.area?.pts && (!mapSub || hasSub(i, mapSub)) && (!onlyInsp || i.id === onlyInsp))
+      .forEach(i => { const k = i.area.zoneId || JSON.stringify(i.area.pts); (groups.get(k) || groups.set(k, []).get(k)).push(i); });
+    const used = new Set([...groups.values()].map(g => g[0].area.zoneId).filter(Boolean));
+    return [
+      ...(plans[planId].zones || []).filter(z => !used.has(z.id)).map(z => ({ id: 'z:' + z.id, pts: z.pts, kind: 'zone', label: z.name })),
+      ...team.filter(a => a.planId === planId && a.area?.pts && (!mapSub || (a.subIds || []).includes(mapSub)) && (!onlyTeam || a.id === onlyTeam))
+        .map(a => ({ id: 'ta:' + a.id, pts: a.area.pts, kind: 'team', color: teamColor(a, subs) })),
+      ...[...groups.values()].map(g => { const cols = new Set(g.map(i => auditColor(i, subs))); return { id: 'ia:' + g[0].id, pts: g[0].area.pts, kind: 'area', color: cols.size === 1 ? [...cols][0] : '#1A56A8', label: g[0].area.name || g[0].zone || '' }; }),
+    ];
+  };
   const pv = createPlanViewer($('#map'), {
-    imageURL: await db.blobURL(plans[planId].blobId), pins: computePins(), cover: 2.4,
-    focus: onlyInsp ? insps.find(i => i.id === onlyInsp)?.pin : null,
-    onPinTap: p => pinSheet(p.id, { subs, insps, acts }),
+    imageURL: await db.blobURL(plans[planId].blobId), pins: computePins(), areas: computeAreas(), cover: 2.4,
+    focus: onlyInsp ? insps.find(i => i.id === onlyInsp)?.pin : onlyTeam ? team.find(a => a.id === onlyTeam)?.pin : null,
+    onPinTap: p => p.id.startsWith('t:') ? teamSheet(team.find(a => a.id === p.id.slice(2)), subs) : pinSheet(p.id, { subs, insps, acts }),
     // appui long sur une épingle puis glisser : on la déplace
     onPinMove: cloud.can('actions') ? async (p, x, y) => {
       const [kind, id] = p.id.split(':');
@@ -1153,7 +1584,7 @@ async function vMap(q) {
     const b = e.target.closest('[data-ms]'); if (!b) return;
     mapSub = b.dataset.ms;
     view.querySelectorAll('[data-ms]').forEach(x => x.classList.toggle('on', x === b));
-    pv.setPins(computePins());
+    pv.setPins(computePins()); pv.setAreas(computeAreas());
   };
   $('#m-plan')?.addEventListener('change', e => { location.hash = '#/map?plan=' + e.target.value; });
   $('#m-act').onclick = e => {
@@ -1194,6 +1625,40 @@ function newObservationHere(planId, pin, subList) {
 let showArchived = false;
 // ---------- onglet Audits : par date / par sous-traitant ----------
 let auditSub = '';
+/** Onglets de la page Audits (+ « Équipe » pour un HSE qui a le droit d'aperçu) */
+const auditTabs = on => {
+  const tabs = [['date', '#/audits', 'Par date'], ['sub', '#/subs', 'Par entreprise'], ...(cloud.can('team') ? [['team', '#/audits-team', 'Équipe']] : [])];
+  return `<div class="tabs3 ${tabs.length === 2 ? 'two' : ''}">${tabs.map(([k, h, l]) => `<a class="${k === on ? 'on' : ''}" href="${h}">${l}</a>`).join('')}</div>`;
+};
+/** Aperçu d'un audit d'un autre HSE : chiffres et lieu, sans le détail */
+const teamLabel = (a, subs) => { const n = (a.subIds || []).map(id => subs[id]?.name).filter(Boolean); return n.length ? n.join(' + ') : a.zone ? `Zone · ${a.zone}` : 'Audit de zone'; };
+const teamColor = (a, subs) => (a.subIds || []).length === 1 ? subs[a.subIds[0]]?.color || '#607D8B' : '#607D8B';
+function teamCard(a, subs) {
+  return `<button type="button" class="card link insp-card team-card" data-team="${a.id}" style="--c:${esc(teamColor(a, subs))}">
+    <div class="grow"><b class="insp-sub">${esc(teamLabel(a, subs))}</b>
+      <div class="insp-meta">${esc(a.inspectors || 'HSE')} · ${dateFR(a.date)} · ${a.done || 0}/124 critères</div>
+      ${a.zone ? `<div class="insp-loc">${ic('pin', 14)} ${esc(a.zone)}</div>` : ''}</div>
+    ${a.pct === null || a.pct === undefined ? '<span class="badge none">—</span>' : badge(a.pct)}</button>`;
+}
+function teamSheet(a, subs) {
+  openSheet(`<h3>${esc(teamLabel(a, subs))}</h3>
+    <div class="row"><span class="grow muted">${dateFR(a.date)} · ${esc(a.inspectors || 'HSE')}</span>${a.pct === null || a.pct === undefined ? '' : badge(a.pct)}</div>
+    ${a.zone ? `<p>${ic('pin', 16)} ${esc(a.zone)}</p>` : ''}
+    <p class="muted small">${a.done || 0}/124 critères notés · aperçu de l’équipe : le détail reste visible par l’auteur et l’administrateur.</p>
+    <div class="btns">${a.planId && (a.pin || a.area) ? `<a class="btn" href="#/map?plan=${a.planId}&team=${a.id}" data-close>${ic('map', 18)} Voir sur le plan</a>` : ''}<button class="btn primary" data-close>Fermer</button></div>`);
+}
+async function vTeamAudits() {
+  if (!cloud.can('team')) return vNotFound();
+  setTop({ title: 'Audits', sub: 'Aperçu de l’équipe' });
+  const { subs } = await maps();
+  const list = (await cloud.teamAudits()).filter(a => !PROJECT || a.projectId === PROJECT.id).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  const today = todayISO(), week = todayISO(-7), month = todayISO(-31);
+  const groups = [['Aujourd’hui', a => a.date === today], ['Cette semaine', a => a.date < today && a.date >= week], ['Ce mois-ci', a => a.date < week && a.date >= month], ['Plus ancien', a => a.date < month]];
+  view.innerHTML = `${auditTabs('team')}
+    <p class="muted small" style="margin:0 2px 10px">Audits des autres HSE : date, zone, entreprise et score. Le détail reste chez leur auteur.</p>
+    ${groups.map(([label, f]) => { const g = list.filter(f); return g.length ? `<div class="section-head"><span>${label}</span><span class="muted small">${g.length}</span></div>${g.map(a => teamCard(a, subs)).join('')}` : ''; }).join('') || '<div class="empty">Aucun audit de l’équipe pour le moment.</div>'}`;
+  view.addEventListener('click', e => { const b = e.target.closest('[data-team]'); if (b) teamSheet(list.find(a => a.id === b.dataset.team), subs); });
+}
 async function vAudits() {
   setTop({ title: 'Audits' });
   const [{ subs, subList }, insps] = await Promise.all([maps(), pAll('inspections')]);
@@ -1208,7 +1673,7 @@ async function vAudits() {
     }).join('') || '<div class="empty">Aucun audit</div>';
   };
   view.innerHTML = `
-    <div class="tabs3 two"><a class="on" href="#/audits">Par date</a><a href="#/subs">Par entreprise</a></div>
+    ${auditTabs('date')}
     <div class="chips-bar flush">
       <button data-as="" class="${!auditSub ? 'on' : ''}">Tous</button>
       ${active.map(s => `<button data-as="${s.id}" class="${auditSub === s.id ? 'on' : ''}" style="--c:${esc(s.color)}"><i></i>${esc(s.name)}</button>`).join('')}
@@ -1232,7 +1697,7 @@ async function vSubs() {
   }).sort((a, b) => (b.pct ?? -1) - (a.pct ?? -1) || a.s.name.localeCompare(b.s.name));
   let rank = 0;
   view.innerHTML = `
-    <div class="tabs3 two"><a href="#/audits">Par date</a><a class="on" href="#/subs">Par entreprise</a></div>
+    ${auditTabs('sub')}
     <div class="section-head"><span>Classement — dernier audit</span></div>
     ${rows.map(({ s, pct, open, late }) => `<a class="card link row sub-row" href="#/sub/${s.id}" style="--c:${esc(s.color)};${s.archived ? 'opacity:.5' : ''}">
         <span class="rank">${pct === null ? '–' : ++rank}</span>
@@ -1383,6 +1848,67 @@ async function vProjects() {
     }).join('')}`;
 }
 
+/** Zones d'un plan (Ahmed) : tracer, renommer, supprimer — utilisées ensuite par toute l'équipe pendant les audits */
+async function vZones(id) {
+  if (!cloud.isAdmin()) return vNotFound();
+  const plan = await db.get('plans', id);
+  if (!plan) return vNotFound();
+  plan.zones ||= [];
+  setTop({ title: 'Zones du plan', sub: plan.name, back: '#/project/' + pid(plan) });
+  const save = async () => { await db.put('plans', plan); };
+  view.innerHTML = `
+    <p class="muted small" style="margin:0 2px 8px">Tracez les zones du chantier une fois pour toutes : pendant un audit, un toucher sur la zone la sélectionne et remplit son nom.</p>
+    <div id="zmap" class="pv zones-map"></div>
+    <div class="plan-tools"><button class="btn primary" id="zdraw">${ic('edit', 18)} Tracer une nouvelle zone</button></div>
+    <div class="section-head"><span>Zones</span><span class="muted small" id="zcount"></span></div>
+    <div id="zlist"></div>`;
+  const areas = () => plan.zones.map(z => ({ id: z.id, pts: z.pts, kind: 'zone', label: z.name }));
+  let pv = null;
+  const drawList = () => {
+    $('#zcount').textContent = plan.zones.length;
+    $('#zlist').innerHTML = plan.zones.length ? [...plan.zones].sort((a, b) => natural(a.name, b.name)).map(z => `<div class="card row zone-row" data-zid="${z.id}">
+      <span class="ic-round">${ic('map', 18)}</span><input class="in grow" data-zn="${z.id}" value="${esc(z.name)}">
+      <button class="btn small-btn" data-zfocus="${z.id}" aria-label="Voir">${ic('pin', 18)}</button>
+      <button class="btn danger small-btn" data-zdel="${z.id}" aria-label="Supprimer">${ic('trash', 18)}</button></div>`).join('')
+      : '<div class="empty">Aucune zone pour le moment.<br>Touchez « Tracer une nouvelle zone ».</div>';
+    pv?.setAreas(areas());
+  };
+  const editZone = z => openSheet(`<h3>Zone</h3><label class="f" style="margin-top:0">Nom</label><input class="in" id="zr" value="${esc(z.name)}">
+    <div class="btns" style="margin-top:14px"><button class="btn danger" id="zd">${ic('trash', 18)} Supprimer</button><button class="btn primary" id="zo">Enregistrer</button></div>`,
+  (el, close) => {
+    el.querySelector('#zo').onclick = async () => { z.name = el.querySelector('#zr').value.trim() || z.name; await save(); close(); drawList(); };
+    el.querySelector('#zd').onclick = async () => { if (!await confirmBox(`Supprimer la zone ${z.name} ?`, 'Les audits déjà faits gardent leur zone.', 'Supprimer')) return; plan.zones = plan.zones.filter(x => x !== z); await save(); close(); drawList(); };
+  });
+  pv = createPlanViewer($('#zmap'), {
+    imageURL: await db.blobURL(plan.blobId), pins: [], areas: areas(), cover: 2.4,
+    onZoneTap: a => { const z = plan.zones.find(x => x.id === a.id); if (z) editZone(z); },
+  });
+  onCleanup(() => pv.destroy());
+  let drawing = false;
+  const setDraw = on => { drawing = on; pv.setDrawMode(on, onDrawn); $('#zdraw').classList.toggle('on', on); $('#zdraw').innerHTML = `${ic('edit', 18)} ${on ? 'Tracez sur le plan… (toucher pour annuler)' : 'Tracer une nouvelle zone'}`; };
+  const onDrawn = pts => {
+    setDraw(false);
+    openSheet(`<h3>Nouvelle zone</h3><label class="f" style="margin-top:0">Nom de la zone</label><input class="in" id="zn" placeholder="ex. DCH2 nord, UTI 12…" autocomplete="off">
+      <div class="btns" style="margin-top:14px"><button class="btn" data-close>Annuler</button><button class="btn primary" id="zok">Ajouter</button></div>`,
+    (el, close) => {
+      setTimeout(() => el.querySelector('#zn').focus(), 50);
+      el.querySelector('#zok').onclick = async () => {
+        const name = el.querySelector('#zn').value.trim(); if (!name) return toast('Donnez un nom à la zone');
+        plan.zones.push({ id: db.uid(), name, pts }); await save(); close(); drawList(); toast('Zone ajoutée');
+      };
+    });
+  };
+  $('#zdraw').onclick = () => setDraw(!drawing);
+  $('#zlist').addEventListener('change', async e => { const z = plan.zones.find(x => x.id === e.target.dataset.zn); if (z) { z.name = e.target.value.trim() || z.name; await save(); pv.setAreas(areas()); } });
+  $('#zlist').addEventListener('click', async e => {
+    const f = e.target.closest('[data-zfocus]'); if (f) { const z = plan.zones.find(x => x.id === f.dataset.zfocus); pv.focusArea(z.pts); $('#zmap').scrollIntoView({ block: 'center', behavior: 'smooth' }); return; }
+    const d = e.target.closest('[data-zdel]'); if (!d) return;
+    const z = plan.zones.find(x => x.id === d.dataset.zdel);
+    if (!await confirmBox(`Supprimer la zone ${z.name} ?`, 'Les audits déjà faits gardent leur zone.', 'Supprimer')) return;
+    plan.zones = plan.zones.filter(x => x !== z); await save(); drawList();
+  });
+  drawList();
+}
 async function vProject(id) {
   if (!cloud.isAdmin()) return vNotFound();
   const isNew = id === 'new';
@@ -1408,7 +1934,7 @@ async function vProject(id) {
     ${isNew ? `<button class="btn primary big" id="create">Créer le projet</button>` : `
     <div class="section-head"><span>Plans</span><span class="muted small">${plans.length}</span></div>
     ${plans.map(x => `<div class="card row plan-row" data-plan="${x.id}"><img class="plan-thumb" data-img="${x.blobId}">
-      <input class="in grow" data-pn="${x.id}" value="${esc(x.name)}"><button class="btn danger small-btn" data-pdel="${x.id}" aria-label="Supprimer">${ic('trash', 18)}</button></div>`).join('')}
+      <input class="in grow" data-pn="${x.id}" value="${esc(x.name)}"><a class="btn small-btn" href="#/plan/${x.id}/zones">${ic('map', 18)} Zones${(x.zones || []).length ? ` (${x.zones.length})` : ''}</a><button class="btn danger small-btn" data-pdel="${x.id}" aria-label="Supprimer">${ic('trash', 18)}</button></div>`).join('')}
     <label class="btn block">${ic('upload')} Ajouter un plan (image ou PDF)<input type="file" accept="image/*,application/pdf,.pdf" class="hidden-input" id="p-in"></label>
     <div class="section-head"><span>Entreprises du projet</span><span class="muted small" id="ncomp">${(p.companyIds || []).length} sélectionnée(s)</span></div>
     <p class="muted small" style="margin:-4px 2px 8px">Cochez les entreprises qui travaillent sur ce projet. <a href="#/companies">Gérer l’annuaire</a></p>
@@ -1514,6 +2040,8 @@ async function vSettings() {
 ` : ''}
     <div class="card">
       ${cloud.enabled ? '' : `<label class="f" style="margin-top:0">Inspecteur par défaut</label><input class="in" data-s="inspector" value="${esc(st.inspector)}">`}
+      <label class="row check-line perm-row" style="margin-top:12px"><span class="grow"><b>Joindre les photos aux actions envoyées</b><small>« Envoyer à l’entreprise » : décochez si le client interdit de diffuser les photos du site</small></span>
+        <input type="checkbox" class="switch" id="share-ph" ${st.sharePhotos === false ? '' : 'checked'}></label>
       <label class="f">Affichage</label><div class="seg" id="theme">${[['auto', 'Auto'], ['light', 'Clair'], ['dark', 'Sombre']].map(([v, l]) => `<button data-val="${v}" class="${st.theme === v ? 'on' : ''}">${l}</button>`).join('')}</div>
     </div>
     ${cloud.isAdmin() ? `<div class="section-head"><span>Administration</span></div>
@@ -1542,6 +2070,7 @@ async function vSettings() {
   const save = debounce(() => saveSettings(st), 300);
   onCleanup(() => save.flush());
   view.addEventListener('input', e => { const k = e.target.dataset.s; if (k) { st[k] = e.target.value; save(); } });
+  $('#share-ph').onchange = e => { st.sharePhotos = e.target.checked; save.flush(); toast(e.target.checked ? 'Les photos seront jointes' : 'Seul le texte sera envoyé'); };
   $('#theme').onclick = e => { const b = e.target.closest('[data-val]'); if (!b) return; st.theme = b.dataset.val; save.flush(); applyTheme(st.theme); render(); };
   $('#scale').onclick = showScale;
   $('#reset').onclick = async () => {
@@ -1554,12 +2083,7 @@ async function vSettings() {
     toast('Tous les audits ont été effacés'); location.hash = '#/';
   };
   if ($('#x-all')) $('#x-all').onclick = async () => { const all = (await pAll('inspections')).sort((a, b) => a.date.localeCompare(b.date)); if (!all.length) return toast('Aucune inspection'); exportSheet(all, { allActions: true }); };
-  $('#bk').onclick = async () => {
-    toast('Préparation de la sauvegarde…');
-    const json = await db.exportAll();
-    await db.setMeta('lastBackup', new Date().toISOString());
-    readySheet(new File([JSON.stringify(json)], `PRT-HSE-sauvegarde-${todayISO()}.json`, { type: 'application/json' }));
-  };
+  $('#bk').onclick = backupNow;
   if ($('#rs')) $('#rs').onchange = async e => {
     const f = e.target.files[0]; if (!f) return;
     if (!await confirmBox('Restaurer cette sauvegarde ?', 'Toutes les données actuelles de l’app seront <b>remplacées</b>.', 'Remplacer mes données')) return;
@@ -1574,11 +2098,14 @@ const PERM_HINTS = {
   details: 'Rouvrir ses audits passés (sinon : uniquement ses chiffres)',
   export: 'Générer les rapports PDF et Excel',
   actions: 'Créer, déplacer et clôturer les actions',
+  team: 'Date, zone, entreprise et score des audits des autres — sans le détail ni les photos',
+  teamActions: 'Sur l’entreprise qu’il audite : les actions encore ouvertes relevées par les autres',
 };
 const permSummary = p => {
   if (p.role === 'admin') return 'Administrateur · accès complet';
-  const on = Object.keys(cloud.PERMS).filter(k => p.perms?.[k] !== false);
-  return on.length === 4 ? 'Tous les droits HSE' : on.length ? on.map(k => ({ audit: 'Audits', details: 'Détail', export: 'Export', actions: 'Actions' })[k]).join(' · ') : 'Lecture seule';
+  const on = Object.keys(cloud.PERMS).filter(k => cloud.OPT_IN.includes(k) ? p.perms?.[k] === true : p.perms?.[k] !== false);
+  const L = { audit: 'Audits', details: 'Détail', export: 'Export', actions: 'Actions', team: 'Aperçu équipe', teamActions: 'Actions des autres' };
+  return on.length === Object.keys(cloud.PERMS).length ? 'Tous les droits' : on.length ? on.map(k => L[k]).join(' · ') : 'Lecture seule';
 };
 const projSummary = (ids, projects) => !ids || !ids.length ? 'Tous les projets' : ids.map(id => projects.find(p => p.id === id)?.name || '?').join(', ');
 const inviteLink = (email, name) => `${location.origin}${location.pathname}#/join?e=${encodeURIComponent(email)}&n=${encodeURIComponent(name || '')}`;
@@ -1607,7 +2134,7 @@ function accessForm(state, projects) {
       <label class="f">Droits</label>
       <div class="perm-list">${Object.entries(cloud.PERMS).map(([k, l]) => `
         <label class="perm-row"><span class="grow"><b>${l}</b><small>${PERM_HINTS[k]}</small></span>
-          <input type="checkbox" class="switch" data-perm="${k}" ${state.perms?.[k] !== false ? 'checked' : ''}></label>`).join('')}</div>
+          <input type="checkbox" class="switch" data-perm="${k}" ${(cloud.OPT_IN.includes(k) ? state.perms?.[k] === true : state.perms?.[k] !== false) ? 'checked' : ''}></label>`).join('')}</div>
       <label class="f">Projets autorisés</label>
       <div class="perm-list">
         <label class="perm-row"><span class="grow"><b>Tous les projets</b><small>y compris les futurs projets</small></span>
@@ -1751,7 +2278,7 @@ async function vStats() {
     ${pList.length > 1 ? `<div class="chips-bar flush scope-bar"><button data-scope="all" class="${statsF.scope === 'all' ? 'on' : ''}">Tous les projets</button>${pList.map(p => `<button data-scope="${p.id}" class="${statsF.scope === p.id ? 'on' : ''}" style="--c:${esc(p.color || '#1A56A8')}"><i></i>${esc(p.name)}</button>`).join('')}</div>` : ''}
     <div class="kpi-grid">
       <div><b>${insps.length}</b><span>Audits</span></div>
-      <div><b style="color:${rating(avg(insps)).color === '#9E9E9E' ? 'inherit' : rating(avg(insps)).color}">${avg(insps) === null ? '—' : Math.round(avg(insps) * 100) + '%'}</b><span>Score moyen</span></div>
+      <div><b style="color:${rating(avg(insps)).color === '#9E9E9E' ? 'inherit' : textTone(rating(avg(insps)).color)}">${avg(insps) === null ? '—' : Math.round(avg(insps) * 100) + '%'}</b><span>Score moyen</span></div>
       <div><b>${open.length}</b><span>Actions ouvertes</span></div>
       <div class="${late.length ? 'late' : ''}"><b>${late.length}</b><span>En retard</span></div>
     </div>
@@ -1839,7 +2366,7 @@ async function vReport(id) {
     <div class="section-head"><span>Informations de l’audit</span></div>
     <div class="card">
       <label class="f" style="margin-top:0">Projet / chantier</label><input class="in" data-i="site" value="${esc(insp.site || '')}">
-      <label class="f">Zone</label><input class="in" data-i="zone" list="zones" value="${esc(insp.zone || '')}"><datalist id="zones">${SEED_LOCATIONS.map(l => `<option value="${esc(l)}">`).join('')}</datalist>
+      <label class="f">Zone</label><input class="in" data-i="zone" autocomplete="off" value="${esc(insp.zone || '')}">
       <div class="btns" style="margin-bottom:0"><div><label class="f">Inspecteur(s)</label><input class="in" data-i="inspectors" value="${esc(insp.inspectors || '')}"></div>
       <div><label class="f">Date</label><input class="in" type="date" data-i="date" value="${esc(insp.date)}"></div></div>
     </div>
@@ -1847,6 +2374,7 @@ async function vReport(id) {
     <div class="perm-list">${Object.entries(SECTION_LABELS).map(([k, [l, h]]) => `<label class="perm-row"><span class="grow"><b>${l}</b><small>${h}</small></span><input type="checkbox" class="switch" data-sec="${k}" ${R.sections[k] ? 'checked' : ''}></label>`).join('')}</div>
     <button class="btn primary big" id="gen" style="margin-top:14px">${ic('file')} Générer le PDF</button>
     <button class="link-btn" id="reset-r" style="display:block;margin:8px auto">Rétablir les textes par défaut</button>`;
+  zonePicker(view.querySelector('[data-i=zone]'));
   view.addEventListener('input', e => {
     const r = e.target.dataset.r, i = e.target.dataset.i;
     if (r) { R[r] = e.target.value; if (r === 'title') view.querySelector('.rp-band').textContent = e.target.value; if (r === 'kind') $('#rp-kind').textContent = kindOf(); save(); }
@@ -1882,6 +2410,7 @@ const routes = [
   [/^\/start\/([^/]+)$/, vStart, 'home'],
   [/^\/start$/, () => vStart(null), 'home'],
   [/^\/audits$/, vAudits, 'audits'],
+  [/^\/audits-team$/, vTeamAudits, 'audits'],
   [/^\/insp\/([^/]+)$/, vInsp, 'home'],
   [/^\/insp\/([^/]+)\/edit$/, vInspEdit, 'home'],
   [/^\/insp\/([^/]+)\/sum$/, vSummary, 'home'],
@@ -1898,6 +2427,7 @@ const routes = [
   [/^\/settings$/, vSettings, 'home'],
   [/^\/projects$/, vProjects, 'home'],
   [/^\/project\/([^/]+)$/, vProject, 'home'],
+  [/^\/plan\/([^/]+)\/zones$/, vZones, 'home'],
   [/^\/companies$/, vCompanies, 'home'],
   [/^\/team$/, vTeam, 'home'],
   [/^\/invite$/, vInvite, 'home'],
@@ -1916,7 +2446,7 @@ function drawSideFoot() {
 async function render() {
   const seq = ++renderSeq;
   cleanups.forEach(f => { try { f(); } catch { /* ignore */ } }); cleanups = [];
-  document.querySelectorAll('.sheet-bg, .kghost').forEach(s => s.remove());
+  document.querySelectorAll('.sheet-bg, .kghost, .pviewer, .annot').forEach(s => s.remove());
   if (PROJECT) await loadProject(); // projet actif relu à chaque écran (entreprises cochées, nom, plans…)
   drawSideFoot();
   // nouveau nœud pour supprimer les écouteurs de l'écran précédent
@@ -1994,15 +2524,26 @@ async function seed() {
   }
   const plans = await db.all('plans');
   if (!plans.some(p => p.code === SEED_PLAN.code)) {
-    const blob = await (await fetch(SEED_PLAN.file)).blob();
-    await db.putBlob(blob, SEED_PLAN_BLOB);
-    await db.put('plans', { id: SEED_PLAN_ID, name: SEED_PLAN.name, code: SEED_PLAN.code, blobId: SEED_PLAN_BLOB });
-    await db.setMeta('lastPlan', SEED_PLAN_ID);
+    // le plan de départ est facultatif : s'il n'est plus publié (confidentialité), on l'importe depuis Réglages → Projets et plans
+    const res = await fetch(SEED_PLAN.file).catch(() => null);
+    const blob = res?.ok ? await res.blob() : null;
+    if (blob && /^image\//.test(blob.type)) {
+      await db.putBlob(blob, SEED_PLAN_BLOB);
+      await db.put('plans', { id: SEED_PLAN_ID, name: SEED_PLAN.name, code: SEED_PLAN.code, blobId: SEED_PLAN_BLOB });
+      await db.setMeta('lastPlan', SEED_PLAN_ID);
+    }
   }
   await db.setMeta('seeded-v3', true);
 }
 
+// couleurs lisibles partout, y compris sur ce qui s'affiche après coup (épingles, listes…)
+new MutationObserver(ms => ms.forEach(m => m.addedNodes.forEach(n => {
+  if (n.nodeType !== 1) return;
+  const c = n.style?.getPropertyValue('--c'); if (c) n.style.setProperty('--on', inkOn(c));
+  applyInk(n);
+}))).observe(document.body, { childList: true, subtree: true });
 (async function boot() {
+  navigator.storage?.persist?.().catch(() => {}); // demande au navigateur de ne pas effacer les audits
   applyTheme((await getSettings()).theme);
   matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', async () => applyTheme((await getSettings()).theme));
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(e => console.warn('SW', e));
