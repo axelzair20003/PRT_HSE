@@ -54,7 +54,7 @@ export function createPlanViewer(container, opts) {
     }
   };
   // zone du plan sous le doigt (la plus petite si plusieurs se chevauchent)
-  const zoneAt = (x, y) => areas.filter(a => a.kind === 'zone' && a.pts?.length > 2 && inside(a.pts, x, y)).sort((a, b) => polyArea(a.pts) - polyArea(b.pts))[0] || null;
+  const zoneAt = (x, y) => areas.filter(a => (a.kind === 'zone' || a.tap) && a.pts?.length > 2 && inside(a.pts, x, y)).sort((a, b) => polyArea(a.pts) - polyArea(b.pts))[0] || null;
   let W = 1, H = 1, s = 1, tx = 0, ty = 0, minS = 0.05;
 
   // le plan ne peut jamais quitter le cadre : plus grand que le cadre, il le couvre toujours ; plus petit, il reste entièrement visible
@@ -68,6 +68,7 @@ export function createPlanViewer(container, opts) {
     clampView();
     stage.style.transform = `translate(${tx}px,${ty}px) scale(${s})`;
     stage.style.setProperty('--inv', 1 / s);
+    if (opts.cluster && W > 1) { const b = Math.round(Math.log(s) / Math.log(1.3)); if (b !== lastBucket) { lastBucket = b; renderPins(); } }
   };
   // cover = le plan remplit tout l'écran (on se déplace au doigt) ; sinon il est entièrement visible
   const fit = (cover = false) => {
@@ -88,12 +89,27 @@ export function createPlanViewer(container, opts) {
     tx = r.width / 2 - x * W * s; ty = r.height / 2 - y * H * s; apply();
   };
 
+  // regroupement : les épingles trop proches à l'écran fusionnent en une bulle « 12 » (toucher = zoom dessus)
+  let shown = [], lastBucket = null;
+  const clusterize = () => {
+    if (!opts.cluster || W <= 1) return pins;
+    const d = 46 / s, out = [];
+    for (const p of pins) {
+      const px = p.x * W, py = p.y * H;
+      const c = out.find(q => Math.hypot(q.cx - px, q.cy - py) < d);
+      if (c) { c.m.push(p); c.cx = (c.cx * (c.m.length - 1) + px) / c.m.length; c.cy = (c.cy * (c.m.length - 1) + py) / c.m.length; }
+      else out.push({ cx: px, cy: py, m: [p] });
+    }
+    return out.map((c, k) => c.m.length === 1 ? c.m[0] : { id: '_c' + k, x: c.cx / W, y: c.cy / H, cluster: true, members: c.m,
+      label: String(c.m.reduce((a, p) => a + (p.count || 1), 0)), color: c.m.every(p => p.kind === 'action') ? '#C62828' : new Set(c.m.map(p => p.color)).size === 1 ? c.m[0].color : '#0B2D5B' });
+  };
   const renderPins = () => {
     layer.innerHTML = '';
-    for (const p of pins) {
+    shown = clusterize();
+    for (const p of shown) {
       const el = document.createElement('button');
       el.type = 'button';
-      el.className = 'pin' + (p.kind === 'action' ? ' pin-action' : '') + (p.ghost ? ' pin-ghost' : '');
+      el.className = 'pin' + (p.cluster ? ' pin-cluster' : '') + (p.kind === 'action' ? ' pin-action' : '') + (p.ghost ? ' pin-ghost' : '') + (p.count > 1 ? ' pin-multi' : '');
       el.style.left = p.x * W + 'px'; el.style.top = p.y * H + 'px';
       el.style.setProperty('--c', p.color || '#0B2D5B');
       el.dataset.pid = p.id;
@@ -125,7 +141,8 @@ export function createPlanViewer(container, opts) {
       const pinEl = e.target.closest?.('.pin');
       if (pinEl && onPinMove) {
         clearTimeout(holdTimer);
-        holdTimer = setTimeout(() => { dragPin = { el: pinEl, pin: pins.find(q => q.id === pinEl.dataset.pid) }; pinEl.classList.add('pin-drag'); navigator.vibrate?.(25); }, 350);
+        const dp = pins.find(q => q.id === pinEl.dataset.pid);
+        if (dp && !dp.fixed) holdTimer = setTimeout(() => { dragPin = { el: pinEl, pin: dp }; pinEl.classList.add('pin-drag'); navigator.vibrate?.(25); }, 350);
       }
     }
     if (pts.size === 2) { multi = true; panning = true; clearTimeout(holdTimer); }
@@ -178,7 +195,13 @@ export function createPlanViewer(container, opts) {
       const moved = Math.hypot(p.x - start.x, p.y - start.y);
       if (!panning && moved < 14 && Date.now() - start.t < 700) {
         const pinEl = start.target.closest?.('.pin');
-        if (pinEl && onPinTap) { onPinTap(pins.find(q => q.id === pinEl.dataset.pid)); }
+        const hit = pinEl && shown.find(q => q.id === pinEl.dataset.pid);
+        if (hit?.cluster) {
+          const xs = hit.members.map(m => m.x), ys = hit.members.map(m => m.y);
+          const span = Math.max((Math.max(...xs) - Math.min(...xs)) * W, (Math.max(...ys) - Math.min(...ys)) * H, 1);
+          const r = container.getBoundingClientRect(), target = Math.min(minS * 40, Math.max(s * 1.8, Math.min(r.width, r.height) * 0.5 / span));
+          const cx = hit.x * W, cy = hit.y * H; s = target; tx = r.width / 2 - cx * s; ty = r.height / 2 - cy * s; apply();
+        } else if (pinEl && onPinTap) { onPinTap(hit || pins.find(q => q.id === pinEl.dataset.pid)); }
         else {
           const x = (p.x - tx) / s / W, y = (p.y - ty) / s / H;
           const z = opts.onZoneTap ? zoneAt(x, y) : null;
@@ -200,7 +223,8 @@ export function createPlanViewer(container, opts) {
   let lastW = 0;
   const ro = new ResizeObserver(() => {
     const w = Math.round(container.getBoundingClientRect().width);
-    if (W > 1 && Math.abs(w - lastW) > 2) { lastW = w; fit(opts.cover); } else { lastW = w; clampView(); apply(); }
+    // 1re mesure : on la note seulement (sinon un plan déjà en cache perdait son zoom de départ)
+    if (W > 1 && lastW && Math.abs(w - lastW) > 2) { lastW = w; fit(opts.cover); } else { lastW = w; clampView(); apply(); }
   });
   ro.observe(container);
 
@@ -219,7 +243,9 @@ export function createPlanViewer(container, opts) {
 export async function renderPlanSnapshot(imageURL, pins, { maxW = 1800, crop = null, areas = [] } = {}) {
   const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = imageURL; });
   let sx = 0, sy = 0, sw = img.naturalWidth, sh = img.naturalHeight;
-  if (crop) { // crop = {x,y,size} normalisé autour d'un point
+  if (crop && crop.x0 !== undefined) { // crop = rectangle normalisé {x0,y0,x1,y1}
+    sx = crop.x0 * sw; sy = crop.y0 * sh; sw = (crop.x1 - crop.x0) * sw; sh = (crop.y1 - crop.y0) * sh;
+  } else if (crop) { // crop = {x,y,size} normalisé autour d'un point
     const size = crop.size * Math.max(sw, sh);
     sx = Math.max(0, Math.min(sw - size, crop.x * sw - size / 2));
     sy = Math.max(0, Math.min(sh - size, crop.y * sh - size / 2));
@@ -239,6 +265,18 @@ export async function renderPlanSnapshot(imageURL, pins, { maxW = 1800, crop = n
     g.closePath();
     g.globalAlpha = 0.28; g.fillStyle = a.color || '#F5C400'; g.fill(); g.globalAlpha = 1;
     g.lineWidth = Math.max(3, c.width / 300); g.strokeStyle = a.color || '#F5C400'; g.stroke();
+  }
+  // nom de la zone : étiquette au-dessus de la zone, lisible
+  for (const a of areas) {
+    if (!a.label || !a.pts || a.pts.length < 3) continue;
+    const xs = a.pts.map(p => (p.x * img.naturalWidth - sx) * k), ys = a.pts.map(p => (p.y * img.naturalHeight - sy) * k);
+    const fs = Math.max(14, c.width / 55), cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+    g.font = `bold ${fs}px sans-serif`; const tw = g.measureText(a.label).width + fs;
+    // sous la zone : les épingles pointent vers le haut et ne cachent pas le nom
+    let ty = Math.max(...ys) + fs * 0.95; if (ty > c.height - fs) ty = Math.max(...ys) - fs * 0.95;
+    const tx = Math.max(tw / 2 + 2, Math.min(c.width - tw / 2 - 2, cx));
+    g.fillStyle = a.color || '#0B2D5B'; g.beginPath(); if (g.roundRect) g.roundRect(tx - tw / 2, ty - fs * 0.75, tw, fs * 1.5, fs * 0.75); else g.rect(tx - tw / 2, ty - fs * 0.75, tw, fs * 1.5); g.fill();
+    g.fillStyle = '#fff'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(a.label, tx, ty + 1);
   }
   for (const p of pins) {
     const x = (p.x * img.naturalWidth - sx) * k, y = (p.y * img.naturalHeight - sy) * k;

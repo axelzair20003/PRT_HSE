@@ -1,7 +1,7 @@
 // Exports Excel (4 feuilles identiques au fichier d'origine), PDF, partage iOS.
 import { THEMES } from './prt-data.js';
 import { SCALE, RATINGS, NA, overallScore, themeScore, rating, criterionOfRef } from './calc.js';
-import { renderPlanSnapshot, bbox } from './plan.js';
+import { renderPlanSnapshot } from './plan.js';
 import * as db from './db.js';
 import { TXT, THEME_FR, CRIT_FR, RATING_FR, RANGE_FR } from './report-fr.js';
 import { fillPRTTemplate } from './xlsx-template.js';
@@ -192,14 +192,17 @@ export async function buildPDF(insp) {
 
   // ============ PAGE 1 : SYNTHÈSE ============
   header(currentTitle);
-  if (project?.logoId) {
-    const lb = await db.getBlob(project.logoId);
-    if (lb) { const lu = await blobToDataURL(lb); const ls = await imgSize(lu); const lh = 14, lw = Math.min(40, lh * ls.w / ls.h); doc.addImage(lu, 'JPEG', W - M - lw, 19, lw, lw * ls.h / ls.w); }
+  // logos du rapport (ex. Jan De Nul + Besix) : en haut de la 1re page, en petit dans le pied des suivantes
+  const logos = [];
+  for (const id of [project?.logoId, project?.logo2Id].filter(Boolean)) {
+    const lb = await db.getBlob(id).catch(() => null);
+    if (lb) { const u = await blobToDataURL(lb); logos.push({ u, r: (s => s.w / s.h)(await imgSize(u)) }); }
   }
+  { let lx = W - M; for (const lg of [...logos].reverse()) { const lh = 13, lw = Math.min(38, lh * lg.r), h2 = lw / lg.r; lx -= lw; doc.addImage(lg.u, 'JPEG', lx, 18 + (lh - h2) / 2, lw, h2); lx -= 5; } }
   doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...MUTED);
   doc.text((R.kind || '').trim() ? R.kind.trim().toUpperCase() : (L.type[sub.type] || L.type.entreprise), M, y);
   doc.setFont('helvetica', 'bold'); doc.setFontSize(sub.name.length > 28 ? 17 : 24); doc.setTextColor(...INK);
-  doc.text(doc.splitTextToSize(sub.name || '—', CW - 50)[0], M, y + 10);
+  doc.text(doc.splitTextToSize(sub.name || '—', CW - (logos.length > 1 ? 85 : 50))[0], M, y + 10);
   if (sub.color) { doc.setFillColor(...hex(sub.color)); doc.rect(M - 4, y - 3.5, 1.6, 15, 'F'); }
   y += 16;
   const info = [[L.info[0], dateFR(insp.date)], [L.info[1], insp.site || '—'], [L.info[2], [plan?.name, insp.zone].filter(Boolean).join(' — ') || '—'], [L.info[3], insp.inspectors || '—'], [L.info[4], insp.ref], ...(R.to ? [[L.info[5], R.to]] : [])];
@@ -376,24 +379,44 @@ export async function buildPDF(insp) {
 
   // ============ LOCALISATION ============
   const subColor = sub.color || '#0B2D5B';
-  const pins = [...(insp.pin ? [{ ...insp.pin, color: subColor, label: pinLabel }] : []),
-    ...acts.map((a, i) => a.pin && a.planId === insp.planId ? { ...a.pin, color: '#C62828', label: String(i + 1) } : null).filter(Boolean)];
-  if (R.sections.plan && plan?.blobId && pins.length) {
+  const hasArea = insp.area?.pts?.length > 2;
+  const zoneColor = single ? subColor : '#1A56A8';
+  const actPins = acts.map((a, i) => a.pin && a.planId === insp.planId ? { ...a.pin, color: '#C62828', label: String(i + 1) } : null).filter(Boolean);
+  // zone tracée : on dessine la zone (contour + nom) au lieu d'une épingle, pour ne pas masquer les actions
+  const pins = [...(insp.pin && !hasArea ? [{ ...insp.pin, color: subColor, label: pinLabel }] : []), ...actPins];
+  if (R.sections.plan && plan?.blobId && (pins.length || hasArea)) {
     newPage(L.plan);
     const url = await db.blobURL(plan.blobId);
-    const areas = insp.area?.pts?.length > 2 ? [{ pts: insp.area.pts, color: subColor }] : [];
+    const areas = hasArea ? [{ pts: insp.area.pts, color: zoneColor, label: insp.zone || insp.area.name || '' }] : [];
     const full = await renderPlanSnapshot(url, pins, { maxW: 2200, areas });
     const fs = await imgSize(full);
     let ih = Math.min(120, CW * fs.h / fs.w), iw = ih * fs.w / fs.h;
     doc.addImage(full, 'JPEG', M + (CW - iw) / 2, y, iw, ih); y += ih + 5;
     doc.setFontSize(8.5); doc.setTextColor(...MUTED);
-    doc.text(L.planLegend(pinLabel, insp.zone, acts.some(a => a.pin)), M, y); y += 7;
-    if (insp.pin) {
-      const b = areas.length ? bbox(areas[0].pts) : null;
-      const crop = b ? { x: b.x + b.w / 2, y: b.y + b.h / 2, size: Math.min(0.7, Math.max(0.15, Math.max(b.w, b.h) * 1.5)) } : { x: insp.pin.x, y: insp.pin.y, size: 0.3 };
-      const zoom = await renderPlanSnapshot(url, pins, { maxW: 1400, crop, areas });
-      doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(...INK); doc.text(L.closeUp, M, y); y += 3;
-      doc.addImage(zoom, 'JPEG', M, y, 100, 100);
+    doc.text(hasArea ? L.planLegendArea(insp.zone, actPins.length) : L.planLegend(pinLabel, insp.zone, actPins.length), M, y); y += 7;
+    // zoom : cadré serré sur la zone (ou l'épingle) et les actions, format 3:2
+    const pts = [...(hasArea ? insp.area.pts : insp.pin ? [insp.pin] : []), ...actPins];
+    if (pts.length) {
+      const fw = fs.w, fh = fs.h, R2 = 1.5;
+      let x0 = Math.min(...pts.map(p => p.x)) * fw, x1 = Math.max(...pts.map(p => p.x)) * fw, y0 = Math.min(...pts.map(p => p.y)) * fh, y1 = Math.max(...pts.map(p => p.y)) * fh;
+      const pad = Math.max(x1 - x0, y1 - y0) * 0.22 + fw * 0.03;
+      x0 -= pad; x1 += pad; y0 -= pad * 1.6; y1 += pad; // un peu plus en haut : les épingles dépassent au-dessus du point
+      let w = x1 - x0, h = y1 - y0;
+      if (w / h < R2) w = h * R2; else h = w / R2;
+      if (w < fw * 0.2) { w = fw * 0.2; h = w / R2; }
+      if (w > fw) { w = fw; h = w / R2; }
+      if (h > fh) { h = fh; w = Math.min(fw, h * R2); }
+      const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+      const cx0 = Math.max(0, Math.min(fw - w, cx - w / 2)), cy0 = Math.max(0, Math.min(fh - h, cy - h / 2));
+      if (w < fw * 0.8) {
+        const crop = { x0: cx0 / fw, y0: cy0 / fh, x1: (cx0 + w) / fw, y1: (cy0 + h) / fh };
+        const zoom = await renderPlanSnapshot(url, pins, { maxW: 1800, crop, areas });
+        ensure(110);
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(...INK); doc.text(L.closeUp, M, y); y += 3;
+        const zw = Math.min(CW, 150), zh = zw / R2;
+        doc.addImage(zoom, 'JPEG', M + (CW - zw) / 2, y, zw, zh);
+        doc.setDrawColor(...LINE); doc.setLineWidth(0.3); doc.rect(M + (CW - zw) / 2, y, zw, zh); y += zh + 4;
+      }
     }
   }
 
@@ -480,6 +503,7 @@ export async function buildPDF(insp) {
     doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
     doc.text(`${insp.ref}  ·  ${L.footer}`, M, H - 7);
     doc.text(`${L.page} ${i} / ${pages}`, W - M, H - 7, { align: 'right' });
+    if (i > 1 && logos.length) { let lx = W - M - 22; for (const lg of [...logos].reverse()) { const lh = 6, lw = Math.min(20, lh * lg.r), h2 = lw / lg.r; lx -= lw; doc.addImage(lg.u, 'JPEG', lx, H - 9.6 + (lh - h2) / 2 - 1.2, lw, h2); lx -= 3; } }
   }
   return doc.output('blob');
 }

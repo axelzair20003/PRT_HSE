@@ -117,7 +117,12 @@ export async function markBlobSynced(id) {
   const r = await get('blobs', id); if (!r) return;
   r.synced = true; await tx(['blobs'], 'readwrite', t => t.objectStore('blobs').put(r));
 }
-export async function deleteBlob(id) { return tx(['blobs'], 'readwrite', t => t.objectStore('blobs').delete(id)); }
+export async function deleteBlob(id) {
+  const r = await tx(['blobs'], 'readwrite', t => t.objectStore('blobs').delete(id));
+  // mode équipe : la photo sera aussi effacée du serveur à la prochaine synchronisation
+  try { window.dispatchEvent(new CustomEvent('prt:blob-deleted', { detail: id })); } catch { /* hors navigateur */ }
+  return r;
+}
 
 const urlCache = new Map();
 export async function blobURL(id) {

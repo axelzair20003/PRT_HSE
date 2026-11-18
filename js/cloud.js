@@ -36,6 +36,7 @@ export async function init() {
   db.setBlobResolver(fetchBlob);
   db.onWrite(store => { if (KIND[store]) syncSoon(); });
   window.addEventListener('online', () => syncSoon(300));
+  window.addEventListener('prt:blob-deleted', async e => { const l = await db.getMeta('blobDeletes', []); if (!l.includes(e.detail)) { l.push(e.detail); await db.setMeta('blobDeletes', l); } });
   setInterval(() => syncSoon(0), 60_000);
   await refreshPending();
 }
@@ -54,7 +55,8 @@ async function loadProfile() {
 const friendly = e => {
   const m = e?.message || String(e);
   if (/invalid login/i.test(m)) return new Error('Email ou mot de passe incorrect.');
-  if (/database error saving new user|not invited/i.test(m)) return new Error('Cette adresse n’a pas été invitée. Demandez à Ahmed de vous ajouter.');
+  if (/bad invite code/i.test(m)) return new Error('Code d’invitation incorrect : utilisez le lien reçu dans le message d’invitation.');
+  if (/database error saving new user|not invited/i.test(m)) return new Error('Adresse non invitée ou code d’invitation incorrect. Utilisez le lien reçu, ou demandez une nouvelle invitation.');
   if (/already registered|already been registered/i.test(m)) return new Error('Ce compte existe déjà : utilisez « Se connecter ».');
   if (/password should|at least/i.test(m)) return new Error('Mot de passe trop court (8 caractères minimum).');
   if (/fetch|network/i.test(m)) return new Error('Pas de connexion internet. La première connexion nécessite du réseau.');
@@ -66,8 +68,8 @@ export async function signIn(email, password) {
   if (error) throw friendly(error);
   session = data.session; await loadProfile(); await afterLogin();
 }
-export async function signUp(email, password, name) {
-  const { data, error } = await sb.auth.signUp({ email: email.trim().toLowerCase(), password, options: { data: { name: name.trim() } } });
+export async function signUp(email, password, name, code = '') {
+  const { data, error } = await sb.auth.signUp({ email: email.trim().toLowerCase(), password, options: { data: { name: name.trim(), code: code.trim().toUpperCase() } } });
   if (error) throw friendly(error);
   if (!data.session) throw new Error('Compte créé, mais Supabase demande une confirmation par email : désactivez « Confirm email » (voir guide).');
   session = data.session; await loadProfile(); await afterLogin();
@@ -112,6 +114,7 @@ export function sync() {
     emit({ state: 'syncing', error: null });
     try {
       await push();
+      await purgeRemoteBlobs();
       await pull();
       await db.setMeta('lastSync', new Date().toISOString());
       emit({ state: 'ok', last: new Date().toISOString() });
@@ -124,7 +127,7 @@ export function sync() {
 }
 
 const photosOf = (store, r) => store === 'inspections' ? [...Object.values(r.scores || {}).flatMap(s => s?.photos || []), ...(r.goods || []).flatMap(g => g.photos || []), r.signature?.blobId]
-  : store === 'actions' ? [...(r.photos || []), ...(r.photosAfter || [])] : store === 'plans' ? [r.blobId] : (store === 'subs' || store === 'projects') ? [r.logoId] : [];
+  : store === 'actions' ? [...(r.photos || []), ...(r.photosAfter || [])] : store === 'plans' ? [r.blobId] : store === 'projects' ? [r.logoId, r.logo2Id] : store === 'subs' ? [r.logoId] : [];
 const blobPath = (store, owner, id) => ADMIN_ONLY.includes(store) ? { bucket: 'shared', path: id } : { bucket: 'photos', path: `${owner}/${id}` };
 
 async function push() {
@@ -169,6 +172,20 @@ function summaryOf(i) {
 }
 /** Aperçu des audits des autres HSE (droit « aperçu équipe ») */
 export async function teamAudits() { return Object.values(await db.getMeta('teamAudits', {})).filter(a => !a.deleted); }
+
+/** Photos effacées dans l'app → effacées aussi du stockage (sinon on paie pour des photos inutiles) */
+async function purgeRemoteBlobs() {
+  const ids = await db.getMeta('blobDeletes', []);
+  if (!ids.length) return;
+  const paths = await db.getMeta('blobPaths', {});
+  for (const id of ids) {
+    const p = paths[id] || { bucket: 'photos', path: `${uid()}/${id}` };
+    if (p.bucket === 'shared' && !isAdmin()) continue;
+    await sb.storage.from(p.bucket).remove([p.path]).catch(() => {});
+    delete paths[id];
+  }
+  await db.setMeta('blobPaths', paths); await db.setMeta('blobDeletes', []);
+}
 
 async function uploadBlob(id, { bucket, path }) {
   const r = await db.blobRecord(id);
@@ -227,6 +244,12 @@ export async function invite(email, name, role = 'inspector', perms = null, proj
   if (perms) row.perms = perms;
   const { error } = await sb.from('invites').upsert(row);
   if (error) throw friendly(error);
+}
+/** Code d'invitation personnel (lisible par l'admin uniquement) */
+export async function inviteCode(email) {
+  const { data, error } = await sb.from('invites').select('code').eq('email', email.trim().toLowerCase()).single();
+  if (error) throw friendly(error);
+  return data?.code || '';
 }
 /** Modifier les accès d'un membre (rôle, droits, projets autorisés) */
 export async function setAccess(id, { role, perms, projects }) {

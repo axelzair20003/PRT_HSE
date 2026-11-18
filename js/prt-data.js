@@ -1,4 +1,4 @@
-// Source : PRT Subbies Friendly SAM2 Layout.xlsx - feuille HSE Scoring Sheet
+// Source : grille PRT Subbies Friendly - feuille HSE Scoring Sheet
 export const THEMES = [
  {
   "ref": "1.0",

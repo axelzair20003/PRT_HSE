@@ -1,5 +1,18 @@
-// Données initiales : sous-traitants (GSafe_BOTG_SAM2A_S47_5.xlsx + Unitec, Alphascaff) et zones
-export const SEED_SUBS = [{"name": "JDN/Besix", "color": "#1565C0"}, {"name": "Blocotelha", "color": "#C62828"}, {"name": "TRBA", "color": "#2E7D32"}, {"name": "VKE", "color": "#455A64"}, {"name": "Reditec", "color": "#6A1B9A"}, {"name": "Borgel", "color": "#00897B"}, {"name": "Hommema", "color": "#AD1457"}, {"name": "Betocor", "color": "#6D4C41"}, {"name": "Unitec", "color": "#F9A825"}, {"name": "Alphascaff", "color": "#E65100", "type": "sub"}];
-export const SEED_LOCATIONS = ["DCH4", "Utilities", "DCH Soetaert area", "MYD Soetaert area", "Haul road EYD", "SB2", "Main road", "Site entrance Farciennes", "Soetaert area", "EYD G", "Roof DCH4", "DCH2", "DCH3", "FSA C", "Loading bay", "Roof FSA B", "SB1", "Trench 3", "UTI 11", "Zone 17 - Utilities", "FSA B", "Roof DCH1", "UTI 14 N", "UTI 17", "Axis A", "EYD U", "FSA south trench", "MYD 13", "UTI 12 SW", "UTI 15 S", "DCH1", "MYD 8", "North trench along the building", "Roof DCH3", "SB3", "Trench 5", "UTI 18", "D10/D11", "D23", "FSA A", "FSA steel structure and slab", "Steel structure and slab (FSA)", "Utilities north", "South utilities opposite the Sambre loading dock", "UTI 13", "Fleurus depot", "Rebar and concreting area", "COSHH container area", "Living quarters Envisan/Soetaert", "New welfare SAM2", "WTP storage area", "Waste area", "Roof", "VKE welfare", "MYD", "On the roof DCH4", "UTI 14", "13.0", "13.1", "13.2", "13.4", "All site", "D34", "EYD U / UTI 13 1 et 2", "Loading bay area", "UTI 12", "UTI 13 2", "UTI 15", "Walkways EYD U", "roof of DCH3"];
-export const SEED_PLAN = { name: 'SAM 2A — vue aérienne', code: 'SAM2A', file: 'assets/plan-sam2a.jpg' };
-export const SEED_SITE = 'SAM 2A';
+// Données de départ FACULTATIVES (entreprises, zones, plan) : elles ne sont PAS publiées avec l'app,
+// pour que rien de confidentiel ne soit visible sur Internet. Si un fichier assets/seed.json existe
+// (installation privée), il est lu au premier démarrage ; sinon l'app démarre vide :
+// Ahmed crée le projet, importe le plan et ajoute les entreprises (ou restaure une sauvegarde).
+export let SEED_SUBS = [];
+export let SEED_LOCATIONS = [];
+export let SEED_PLAN = null;   // { name, code, file }
+export let SEED_SITE = '';
+export let SEED_PROJECT = null; // { name, code, site }
+export async function loadSeed() {
+  try {
+    const res = await fetch('assets/seed.json', { cache: 'no-store' });
+    if (!res.ok) return;
+    const s = await res.json();
+    SEED_SUBS = s.subs || []; SEED_LOCATIONS = s.locations || []; SEED_PLAN = s.plan || null;
+    SEED_SITE = s.site || ''; SEED_PROJECT = s.project || null;
+  } catch { /* pas de données de départ : normal */ }
+}

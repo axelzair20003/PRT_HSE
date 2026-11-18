@@ -25,6 +25,8 @@ create table if not exists public.invites (
 );
 alter table public.invites add column if not exists perms jsonb not null default '{"audit": true, "details": true, "export": true, "actions": true}';
 alter table public.invites add column if not exists projects text[];   -- null = tous les projets
+-- code d'invitation personnel (envoyé dans le lien) : sans lui, impossible de créer le compte à cette adresse
+alter table public.invites add column if not exists code text default upper(substr(md5(random()::text || clock_timestamp()::text), 1, 6));
 
 create table if not exists public.profiles (
   id         uuid primary key references auth.users on delete cascade,
@@ -85,6 +87,9 @@ begin
   if not found then
     raise exception 'not invited';
   end if;
+  if inv.code is not null and upper(coalesce(new.raw_user_meta_data ->> 'code', '')) <> upper(inv.code) then
+    raise exception 'bad invite code';
+  end if;
   insert into profiles (id, email, name, role, perms, projects)
   values (new.id, lower(new.email), coalesce(nullif(new.raw_user_meta_data ->> 'name', ''), inv.name), inv.role, inv.perms, inv.projects);
   return new;
@@ -117,7 +122,9 @@ drop policy if exists "docs: lecture" on public.docs;
 create policy "docs: lecture" on public.docs
   for select using (
     public.is_active() and (
-      kind in ('sub', 'plan', 'project') or owner = auth.uid() or public.is_admin()
+      kind = 'sub' or owner = auth.uid() or public.is_admin()
+      -- plans et projets : seulement ceux des projets autorisés
+      or (kind in ('plan', 'project') and public.can_project(project))
       -- aperçu des audits de l'équipe (date, zone, entreprise, score — sans le détail)
       or (kind = 'summary' and public.has_perm('team') and public.can_project(project))
       -- actions relevées par les autres HSE (l'app n'affiche que celles encore ouvertes)
@@ -135,7 +142,7 @@ drop policy if exists "docs: modification" on public.docs;
 create policy "docs: modification" on public.docs
   for update
   using (public.is_active() and ((kind in ('inspection', 'action', 'summary') and owner = auth.uid()) or public.is_admin()))
-  with check (public.is_active() and ((kind in ('inspection', 'action', 'summary') and owner = auth.uid()) or public.is_admin()));
+  with check (public.is_active() and ((kind in ('inspection', 'action', 'summary') and owner = auth.uid() and public.can_project(project)) or public.is_admin()));
 -- pas de suppression physique : l'app marque deleted = true
 
 -- ---------- Stockage des fichiers ----------
@@ -150,6 +157,20 @@ create policy "photos: lecture" on storage.objects for select
 drop policy if exists "photos: envoi" on storage.objects;
 create policy "photos: envoi" on storage.objects for insert
   with check (bucket_id = 'photos' and public.is_active() and ((storage.foldername(name))[1] = auth.uid()::text or public.is_admin()));
+
+-- photos des actions encore ouvertes des autres HSE (droit « Actions des autres »)
+drop policy if exists "photos: actions des autres" on storage.objects;
+create policy "photos: actions des autres" on storage.objects for select
+  using (bucket_id = 'photos' and public.is_active() and public.has_perm('teamActions') and exists (
+    select 1 from public.docs d
+    where d.kind = 'action' and not d.deleted and public.can_project(d.project)
+      and d.owner::text = (storage.foldername(name))[1]
+      and (d.data -> 'photos') ? storage.filename(name)));
+
+-- suppression : chacun ses photos (l'admin toutes), pour ne pas payer le stockage de photos effacées
+drop policy if exists "photos: suppression" on storage.objects;
+create policy "photos: suppression" on storage.objects for delete
+  using (bucket_id = 'photos' and ((storage.foldername(name))[1] = auth.uid()::text or public.is_admin()));
 
 drop policy if exists "photos: remplacement" on storage.objects;
 create policy "photos: remplacement" on storage.objects for update
@@ -168,6 +189,7 @@ create policy "shared: admin remplacement" on storage.objects for update
   using (bucket_id = 'shared' and public.is_admin());
 
 -- ---------- Premier administrateur ----------
-insert into public.invites (email, name, role)
-values (lower('ADRESSE-EMAIL-AHMED@exemple.com'), 'Ahmed', 'admin')   -- ⚠️ à remplacer
+-- (pas de code pour ce premier compte : Ahmed doit créer son compte JUSTE APRÈS avoir lancé ce script)
+insert into public.invites (email, name, role, code)
+values (lower('ADRESSE-EMAIL-AHMED@exemple.com'), 'Ahmed', 'admin', null)   -- ⚠️ à remplacer
 on conflict (email) do update set role = 'admin';

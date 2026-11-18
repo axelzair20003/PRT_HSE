@@ -1,6 +1,6 @@
 # PRT HSE — Site HSE Performance Rating Tool (PWA)
 
-Web app mobile hors ligne pour noter les sous-traitants selon le PRT (fichier « PRT Subbies Friendly SAM2 Layout »).
+Web app mobile hors ligne pour noter les sous-traitants selon le PRT (grille « PRT Subbies Friendly »).
 19 thèmes et 124 critères repris tels quels depuis l'Excel. Chaque inspection et chaque action est liée à un sous-traitant et à une épingle sur le plan.
 
 ## Contenu
@@ -37,7 +37,7 @@ test/calc.test.mjs                        → tests de calcul (node test/calc.te
 
 Alternative Netlify : app.netlify.com → **Add new site → Deploy manually** → glisser le dossier `prt-hse`.
 
-> Mise à jour de l'app : remplacer les fichiers sur GitHub **et** changer `CACHE = 'prt-hse-v1.0.0'` dans `sw.js` (ex. `v1.0.1`). Sur l'iPhone, fermer et rouvrir l'app deux fois.
+> Mise à jour de l'app : remplacer les fichiers sur GitHub **et** changer `CACHE` dans `sw.js` (ex. `prt-hse-v3.11.1`). L'app affiche alors « Nouvelle version disponible » : toucher **Mettre à jour**.
 
 ## 2. Ajouter à l'écran d'accueil de l'iPhone
 1. Ouvrir l'URL dans **Safari** (pas Chrome ; c'est obligatoire sur iOS).
@@ -47,22 +47,33 @@ Alternative Netlify : app.netlify.com → **Add new site → Deploy manually** �
 
 ⚠️ Les données sont stockées **dans l'app sur ce téléphone uniquement**. Faire régulièrement **Réglages → Sauvegarde complète (JSON)** et l'envoyer par mail / OneDrive. Ne pas supprimer l'icône de l'app (iOS effacerait les données).
 
-## 3. Plan et sous-traitants : déjà intégrés
-Au premier lancement, l'app charge automatiquement :
-- le plan **SAM 2A — vue aérienne** (`assets/plan-sam2a.jpg`, code `SAM2A` → références `PRT-SAM2A-2026-001`) ;
-- 10 sous-traitants : Alphascaff, Betocor, Blocotelha, Borgel, Hommema, JDN/Besix, Reditec, TRBA, Unitec, VKE (modifiable dans l'onglet Sous-traitants) ;
-- les 70 zones du fichier (« Roof DCH4 », « UTI 11 »…) en suggestions dans le champ Zone.
+## 3. Plan et entreprises : jamais publiés
+Pour un chantier client, **rien de confidentiel n'est dans le dépôt** : ni plan, ni noms d'entreprises, ni zones.
+Au premier lancement, l'app démarre vide (« Mon chantier ») :
+1. Réglages → Projets et plans : renommer le projet, **importer le plan** (fichier venant du PC ou d'un mail interne, pas d'internet) ;
+2. Accueil → « Ajouter des entreprises » ;
+3. ou plus simple : **restaurer une sauvegarde** (Réglages → Restaurer) faite sur un téléphone déjà configuré.
+En mode équipe, Ahmed le fait une seule fois : plan et entreprises arrivent ensuite sur tous les téléphones.
 
-**Démarrer une inspection = 1 tap** sur le sous-traitant depuis l'accueil. L'inspecteur (« Ahmed » par défaut, modifiable dans Réglages), la date, le site et le plan sont remplis tout seuls. Placer la zone sur le plan est facultatif (carte « 📍 Placer la zone » dans l'inspection).
+Les téléphones qui avaient déjà l'app **gardent** leur plan et leurs audits (ils sont stockés dans le téléphone).
 
-Pour remplacer le plan : remplacer `assets/plan-sam2a.jpg` par une image du même nom, ou importer un autre plan via Réglages → Projets et plans.
+⚠️ Un fichier supprimé d'un dépôt GitHub public reste visible dans son **historique**. Pour effacer complètement l'ancien plan : supprimer le dépôt, le recréer **avec le même nom**, y envoyer ce zip, puis réactiver GitHub Pages. L'adresse de l'app ne change pas et les données des téléphones sont conservées.
 
-### Confidentialité du plan (chantier client)
-Le dépôt GitHub est public : tout fichier qu'il contient est téléchargeable. Pour ne plus publier la vue aérienne du site :
-1. supprimez `assets/plan-sam2a.jpg` du dépôt GitHub ;
-2. les téléphones qui ont déjà ouvert l'app **gardent** le plan (il est stocké dans le téléphone) ;
-3. sur un nouveau téléphone, importez le plan via Réglages → Projets et plans → « Ajouter un plan » (le fichier vient de votre PC ou d'un mail interne, pas d'internet).
-L'app démarre normalement sans ce fichier.
+## Nouveautés v3.11
+- **Confidentialité** : plan, entreprises et zones retirés du dépôt public ; l'app démarre vide et neutre.
+- **Mise à jour en un toucher** : bandeau « Nouvelle version disponible → Mettre à jour » (plus besoin de rouvrir 2 fois).
+- **Thème N/A d'un toucher** depuis l'écran du thème (ex. Plongée).
+- **Mode équipe plus sûr** : code d'invitation personnel dans le lien ; photos des actions des autres visibles (droit « Actions des autres ») ; plans et projets limités aux projets autorisés ; photos supprimées aussi effacées du serveur.
+- Graphique de la fiche entreprise lisible (texte ≥ 12 px), barre du bas agrandie, plan supprimé = image effacée.
+
+## Nouveautés v3.10
+- Audits : recherche, filtres entreprise / HSE, états (brouillon, en cours, terminé), mois passés repliés, brouillons oubliés rangés à part.
+- Tournée : la zone sert de titre ; pastille « ZON » dans la barre de tournée.
+- Plan : vues Audits / Actions / Zones · score, période (7 j, 30 j, 3 mois, tout), bulles de regroupement, fiche d'un lieu.
+- Pilotage : HSE fusionnés (« axel » = « Axel »), 5 premiers + « Voir les autres », clic = ses audits.
+- Action : épingle rouge, zone auditée dessinée, légende ; photo après correction affichée à la clôture.
+- PDF : zoom serré sur la zone, nom de zone sous la zone, 2 logos (Projet → Logos du rapport).
+- Pilotage : bloc « Infractions » (total + tendance, part des règles vitales LSR, entreprise la plus concernée ou classement) + Top 10 en barres, toutes entreprises ou une au choix ; export Excel avec colonne « Objectif ».
 
 ## Nouveautés v3.9
 - **Lisibilité chantier** : textes agrandis (rien d'important sous 14 px), contrastes renforcés, Résumé lisible thème par thème.
@@ -101,13 +112,14 @@ Une fois configurée :
    export const CLOUD = { url: 'https://abcd1234.supabase.co', anonKey: 'sb_publishable_…' };
    ```
    puis changer `CACHE` dans `sw.js` (ex. `prt-hse-v2.0.1`) → *Commit changes*.
-6. **Ahmed se connecte en premier** : ouvrir l'app → *Créer mon compte* avec son email → il est administrateur et envoie les sous-traitants et le plan au serveur.
-7. **Inviter l'équipe** : Réglages → **Équipe et invitations** → nom + email → *Inviter*. La personne ouvre l'app → *Créer mon compte* avec cette adresse.
+6. **Ahmed crée son compte TOUT DE SUITE après l'étape 2** (son invitation n'a pas de code : il faut fermer cette porte au plus vite) : ouvrir l'app → *Créer mon compte* avec son email → il est administrateur et envoie les entreprises et le plan au serveur.
+7. **Inviter l'équipe** : Réglages → **Équipe et invitations** → nom + email → *Inviter* → envoyer le message à la personne. Le lien contient son **code d'invitation personnel** : sans lui, personne d'autre ne peut créer le compte à son adresse.
 
 ### Au quotidien
 - **Bloquer un accès** : Réglages → Équipe → *Bloquer* (ses audits restent visibles pour l'admin).
-- **Mot de passe oublié** : supprimer l'utilisateur dans Supabase (**Authentication → Users**) ; l'invitation reste valable, il recrée son compte.
+- **Mot de passe oublié** : supprimer l'utilisateur dans Supabase (**Authentication → Users**) ; l'invitation reste valable (même lien, même code), il recrée son compte. (La réinitialisation par email demande un serveur mail d'entreprise branché sur Supabase.)
 - **Gratuit** : 500 Mo de base (des dizaines de milliers d'audits), 1 Go de photos (≈ 5 000 photos), 50 000 utilisateurs/mois. Un projet gratuit est mis en pause après 7 jours sans activité : les données sont conservées, il suffit de le relancer depuis supabase.com.
+- **Avec 15–20 HSE** : le 1 Go de photos gratuit sera plein en quelques semaines → passer au plan **Pro (25 $/mois)** : 100 Go de photos, 8 Go de base, plus de mise en pause, sauvegardes quotidiennes. À faire payer par le projet / Jan De Nul.
 - **Pas de sauvegarde automatique** en gratuit : Ahmed fait régulièrement Réglages → *Excel — toutes les inspections* et *Sauvegarde complète*.
 - **Données personnelles** : photos de chantier et noms de sous-traitants sont hébergés chez Supabase (UE). À valider avec Jan De Nul si nécessaire.
 

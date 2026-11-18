@@ -6,11 +6,11 @@ import { createPlanViewer, centroid } from './plan.js';
 import { compressImage, planFileToBlob, pdfPageCount } from './images.js';
 import { ic } from './icons.js';
 import * as cloud from './cloud.js';
-import { SEED_SUBS, SEED_LOCATIONS, SEED_PLAN, SEED_SITE } from './seed.js';
-import { CRIT_FR, TXT as RTXT } from './report-fr.js';
+import { SEED_SUBS, SEED_LOCATIONS, SEED_PLAN, SEED_SITE, SEED_PROJECT, loadSeed } from './seed.js';
+import { CRIT_FR, THEME_FR, TXT as RTXT } from './report-fr.js';
 import { REPORT_DEFAULTS, REPORT_TITLES, buildXLSX, buildPDF, shareFile, download, canShareFile, actionRef } from './export.js';
 
-export const APP_VERSION = '3.9.0';
+export const APP_VERSION = '3.11.0';
 
 // ---------- utilitaires ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -149,7 +149,7 @@ function bindNotices() {
   view.querySelector('[data-bk]')?.addEventListener('click', async e => { await backupNow(); e.target.closest('.notice')?.remove(); });
   view.querySelector('[data-inst]')?.addEventListener('click', async () => { if (!installEvt) return; installEvt.prompt(); const r = await installEvt.userChoice.catch(() => null); installEvt = null; if (r?.outcome === 'accepted') view.querySelector('[data-notice=install]')?.remove(); });
 }
-async function getSettings() { return await db.getMeta('settings', { inspector: 'Ahmed', site: SEED_SITE, theme: 'auto' }); }
+async function getSettings() { return await db.getMeta('settings', { inspector: '', site: SEED_SITE, theme: 'auto' }); }
 async function saveSettings(s) { await db.setMeta('settings', s); }
 function applyTheme(t) {
   const dark = t === 'dark' || (t === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
@@ -205,12 +205,12 @@ async function projectSheet() {
   (el, close) => el.addEventListener('click', e => { const b = e.target.closest('[data-p]'); if (b) { close(); if (b.dataset.p !== PROJECT?.id) switchProject(b.dataset.p); } }));
 }
 
-/** Installations existantes : tout est rattaché au projet SAM 2A */
+/** Installations existantes : tout est rattaché au projet par défaut */
 async function migrateProjects() {
   if (await db.getMeta('projects-v1')) return;
   if (!(await db.get('projects', DEFAULT_PROJECT))) {
     const subs = (await db.all('subs')).filter(s => (s.name || '').trim());
-    await db.put('projects', { id: DEFAULT_PROJECT, name: 'SAM 2A', code: 'SAM2A', site: 'Farciennes', color: '#0B2D5B', companyIds: subs.map(s => s.id), archived: false });
+    await db.put('projects', { id: DEFAULT_PROJECT, name: SEED_PROJECT?.name || 'Mon chantier', code: SEED_PROJECT?.code || 'CHANTIER', site: SEED_PROJECT?.site || '', color: '#0B2D5B', companyIds: subs.map(s => s.id), archived: false });
   }
   for (const store of ['plans', 'inspections', 'actions']) {
     for (const r of await db.all(store, { includeDeleted: true })) if (!r.projectId) await db.putRaw(store, { ...r, projectId: DEFAULT_PROJECT });
@@ -459,7 +459,7 @@ function subGrid(subList, insps = [], acts = []) {
     const late = acts.filter(a => a.subId === s.id && isLate(a)).length;
     const r = rating(pct);
     const status = last?.date === today ? '<span class="tile-tag">En cours</span>'
-      : last ? `<span class="tile-score" style="background:${r.color};color:${r.fg}">${pct === null ? 'N/A' : Math.round(pct * 100) + '%'}</span><span>${dateFR(last.date).slice(0, 5)}</span>`
+      : last ? `<span class="tile-score" style="background:${pct === null ? 'var(--surface-2)' : r.color};color:${pct === null ? 'var(--muted)' : r.fg}">${pct === null ? '—' : Math.round(pct * 100) + '%'}</span><span>${dateFR(last.date).slice(0, 5)}</span>`
       : '<span class="tile-none">Aucun audit</span>';
     return `<button type="button" class="sub-tile" data-start="${s.id}" style="--c:${esc(s.color)}">
       <span class="tile-top"><span class="mono">${esc(abbr(s.name))}</span><span class="tile-name"><b>${esc(s.name)}</b>${s.type === 'sub' ? `<span class="tile-type">${COMPANY_TYPES.sub.label}</span>` : ''}</span></span>
@@ -746,20 +746,22 @@ function chooseCompany(insp, subs) {
   return ask('Action pour quelle entreprise ?', '', [...ids.map(id => ({ label: subs[id]?.name || '?', value: id, cls: 'primary' })), { label: 'Toutes / générale', value: '' }]).then(v => v === undefined ? null : (v || null));
 }
 
-function inspCard(i, subs) {
-  const o = overallScore(i.scores, i.bonus, i.penalty);
-  const done = o.themes.reduce((a, t) => a + t.done, 0);
-  const s = { name: auditLabel(i, subs), color: auditColor(i, subs) };
-  const who = cloud.enabled && cloud.isAdmin() && i.owner !== cloud.uid() ? `${esc(i.inspectors || '')} · ` : '';
-  const lock = isLocked(i) ? `<span class="lock-tag">${ic('check', 13)} Transmis</span>` : '';
-  return `<a class="card link insp-card" href="#/insp/${i.id}" style="--c:${esc(s?.color || '#9E9E9E')}">${lock}
-    <div class="grow">
-      <b class="insp-sub">${esc(s.name)}</b>
-      <div class="insp-meta">${who}${dateFR(i.date)} · ${done}/124 critères</div>
-      ${i.pin || i.zone ? `<div class="insp-loc">${ic('pin', 14)} ${esc(i.zone || 'Localisé sur le plan')}</div>` : ''}
-    </div>
-    ${o.pct === null ? '<span class="badge none">—</span>' : badge(o.pct)}</a>`;
+/** État d'un audit : brouillon (rien noté), en cours, terminé (complet, signé ou transmis) */
+function auditState(i) {
+  const o = overallScore(i.scores, i.bonus, i.penalty), n = o.themes.reduce((a, t) => a + t.done, 0);
+  const st = i.signature || n >= 124 ? 'done' : n ? 'wip' : 'draft';
+  return { o, n, st };
 }
+const ST_TAG = { draft: 'Brouillon', wip: 'En cours', done: 'Terminé' };
+const stTag = (st, n) => `<span class="st-tag s-${st}">${st === 'done' ? ic('check', 12) + ' ' : ''}${ST_TAG[st]}${st === 'wip' ? ` · ${n}/124` : ''}</span>`;
+/** Une ligne d'audit, même format partout (pastille · nom · état · score) */
+function auditRow(i, subs, { meta = true } = {}) {
+  const { o, n, st } = auditState(i);
+  const who = cloud.enabled && cloud.isAdmin() && i.owner !== cloud.uid() && i.inspectors ? ` · ${esc(i.inspectors)}` : '';
+  return `<a class="vg-row" href="#/insp/${i.id}" style="--c:${esc(auditColor(i, subs))}"><span class="mono">${esc(auditAbbr(i, subs))}</span>
+    <span class="grow"><b>${esc(auditLabel(i, subs))}</b><small>${stTag(st, n)}${isLocked(i) ? ' <span class="st-tag s-lock">Transmis</span>' : ''}${meta ? ` ${dateFR(i.date)}${i.zone && subIdsOf(i).length ? ' · ' + esc(i.zone) : ''}${who}` : ''}</small></span>${o.pct === null ? '<span class="badge none">—</span>' : badge(o.pct)}</a>`;
+}
+function inspCard(i, subs) { return `<div class="card visit-group single" style="--c:${esc(auditColor(i, subs))}">${auditRow(i, subs)}</div>`; }
 // ---------- choix de la zone : liste propre, triée, regroupée par secteur ----------
 const ZONE_GROUPS = [['DCH', /^dch/i], ['FSA', /^fsa/i], ['MYD', /^myd/i], ['EYD', /^eyd/i], ['Utilités (UTI)', /^(uti|utilit|zone 17)/i], ['Toitures', /^roof/i], ['SB', /^sb\d/i], ['Tranchées', /trench/i], ['Axes / D', /^(axis|d\d)/i]];
 const zoneKey = z => z.toLowerCase().replace(/^(on the |the )/, '').replace(/^roof of (the )?/, 'roof ').replace(/\s+/g, ' ').trim();
@@ -803,7 +805,7 @@ async function zonePicker(input, plan = null) {
     panel.hidden = true; input.blur(); navigator.vibrate?.(10);
   });
 }
-/** Liste d'audits : ceux d'une même tournée (lancés ensemble) sont regroupés dans un seul bloc */
+/** Liste d'audits : ceux d'une même tournée (lancés ensemble) sont regroupés ; la zone en est le titre */
 function inspList(list, subs) {
   const byVisit = {};
   list.forEach(i => { if (i.visitId) (byVisit[i.visitId] ||= []).push(i); });
@@ -813,14 +815,14 @@ function inspList(list, subs) {
     if (!grp) return inspCard(i, subs);
     if (done.has(i.visitId)) return '';
     done.add(i.visitId);
+    const zAudit = grp.find(x => !subIdsOf(x).length);
+    const comps = grp.filter(x => x !== zAudit).sort((a, b) => auditLabel(a, subs).localeCompare(auditLabel(b, subs)));
     const zone = grp.find(x => x.zone)?.zone;
-    const rows = [...grp].sort((a, b) => auditLabel(a, subs).localeCompare(auditLabel(b, subs))).map(x => {
-      const o = overallScore(x.scores, x.bonus, x.penalty), n = o.themes.reduce((a, t) => a + t.done, 0);
-      return `<a class="vg-row" href="#/insp/${x.id}" style="--c:${esc(auditColor(x, subs))}"><span class="mono">${esc(auditAbbr(x, subs))}</span>
-        <span class="grow"><b>${esc(auditLabel(x, subs))}</b><small>${n}/124 critères</small></span>${o.pct === null ? '<span class="badge none">—</span>' : badge(o.pct)}</a>`;
-    }).join('');
-    return `<div class="card visit-group">
-      <div class="vg-head">${ic('pin', 16)}<span class="grow"><b>Tournée · ${grp.length} entreprises</b><small>${dateFR(i.date)}${zone ? ' · ' + esc(zone) : ''}</small></span></div>${rows}</div>`;
+    const nC = new Set(comps.flatMap(subIdsOf)).size;
+    const who = cloud.enabled && cloud.isAdmin() && i.owner !== cloud.uid() && i.inspectors ? ' · ' + esc(i.inspectors) : '';
+    const zs = zAudit ? auditState(zAudit) : null;
+    const head = `${ic('pin', 18)}<span class="grow"><b>${esc(zone || 'Tournée')}</b><small>Tournée · ${dateFR(i.date)} · ${nC} entreprise${nC > 1 ? 's' : ''}${who}${zs ? ' · zone ' + ST_TAG[zs.st].toLowerCase() : ''}</small></span>${zs ? (zs.o.pct === null ? '<span class="badge none">—</span>' : badge(zs.o.pct)) : ''}`;
+    return `<div class="card visit-group">${zAudit ? `<a class="vg-head" href="#/insp/${zAudit.id}">${head}</a>` : `<div class="vg-head">${head}</div>`}${comps.map(x => auditRow(x, subs, { meta: false })).join('')}</div>`;
   }).join('');
 }
 const daysTo = d => Math.round((new Date(d + 'T12:00:00') - new Date(todayISO() + 'T12:00:00')) / 864e5);
@@ -853,7 +855,7 @@ async function inspForm(state, { live }) {
     <label class="f">Entreprise auditée</label>
     <div class="pick-grid" id="f-subs">${subsActive.map(s => `<button type="button" class="pick ${subIdsOf(state).includes(s.id) ? 'on' : ''}" data-s="${s.id}" style="--c:${esc(s.color)}"><span class="mono xs">${esc(abbr(s.name))}</span><span class="grow">${esc(s.name)}</span>${ic('check', 16)}</button>`).join('')}</div>
     ${planList.length > 1 ? `<label class="f">Plan</label><select class="in" id="f-plan">${planList.map(p => `<option value="${p.id}" ${p.id === state.planId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
-    <label class="f">Inspecteur(s)</label><input class="in" id="f-insp" value="${esc(state.inspectors || '')}" autocomplete="name">
+    <label class="f">Inspecteur(s)</label><input class="in" id="f-insp" list="hse-list" value="${esc(state.inspectors || '')}" autocomplete="off">
     <div class="btns" style="margin:0"><div><label class="f">Date</label><input class="in" type="date" id="f-date" value="${esc(state.date)}"></div>
     <div><label class="f">Projet / chantier</label><input class="in" id="f-site" value="${esc(state.site || '')}"></div></div>
     <div id="form-foot" style="margin-top:16px"></div>`;
@@ -971,7 +973,8 @@ async function vInsp(id) {
   const siblings = insp.visitId ? (await pAll('inspections')).filter(i => i.visitId === insp.visitId).sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '')) : [];
   const visitBar = siblings.length > 1 ? `<div class="visit-bar"><span class="muted small">Tournée · ${siblings.length} audits</span><div class="visit-chips">${siblings.map(v => {
     const vo = overallScore(v.scores, v.bonus, v.penalty), vs = subs[v.subId];
-    return `<a href="#/insp/${v.id}" class="vchip ${v.id === id ? 'on' : ''}" style="--c:${esc(vs?.color || '#9E9E9E')}"><span class="mono xs">${esc(abbr(vs?.name))}</span>${esc(vs?.name || 'Zone')}<em>${vo.pct === null ? '—' : Math.round(vo.pct * 100) + '%'}</em></a>`;
+    const vz = !subIdsOf(v).length;
+    return `<a href="#/insp/${v.id}" class="vchip ${v.id === id ? 'on' : ''}" style="--c:${esc(vz ? '#0B2D5B' : (vs?.color || '#9E9E9E'))}"><span class="mono xs">${vz ? 'ZON' : esc(abbr(vs?.name))}</span>${esc(vz ? (v.zone || 'Zone') : (vs?.name || ''))}<em>${vo.pct === null ? '—' : Math.round(vo.pct * 100) + '%'}</em></a>`;
   }).join('')}${cloud.can('audit') ? `<button type="button" class="vchip vadd" id="v-add">${ic('plus', 16)} Entreprise</button>` : ''}</div></div>` : '';
   const isZone = subIdsOf(insp).length === 0;
   // audit de zone (seul) : on peut y ajouter les entreprises rencontrées
@@ -1087,8 +1090,10 @@ async function vTheme(id, ref) {
 
   const drawScore = () => {
     const t = themeScore(th, insp.scores);
+    const allNA = th.criteria.every(c => insp.scores[c.ref]?.v === NA);
     $('#tscore').innerHTML = `<div class="grow"><b>Score du thème</b><div class="muted small">${t.done}/${t.total} traités${t.max ? ` · ${t.sum}/${t.max} pts` : ''}</div></div>
-      ${t.done === 0 ? '<span class="badge none">—</span>' : badge(t.pct)}`;
+      <button type="button" class="na-btn ${allNA ? 'on' : ''}" id="th-na" aria-label="Thème non applicable" title="Tout le thème non applicable">N/A</button>
+      ${t.done === 0 || allNA ? '<span class="badge none">—</span>' : badge(t.pct)}`;
   };
   const drawThumbs = async card => { card.querySelector('[data-thumbs]').innerHTML = await thumbsHTML(insp.scores[card.dataset.ref]?.photos); };
   // note 5 : proposer de la noter comme bonne pratique (reconnaissance positive)
@@ -1100,6 +1105,15 @@ async function vTheme(id, ref) {
   drawScore();
   view.querySelectorAll('.crit').forEach(c => { drawThumbs(c); drawGood(c); });
 
+  // tout le thème N/A d'un toucher (ex. Plongée), sans revenir à l'écran de l'audit
+  view.addEventListener('click', async e => {
+    if (!e.target.closest('#th-na')) return;
+    const allNA = th.criteria.every(c => insp.scores[c.ref]?.v === NA);
+    if (!allNA && th.criteria.some(c => typeof insp.scores[c.ref]?.v === 'number') &&
+      !await confirmBox(`Marquer « ${th.name} » N/A ?`, 'Les notes déjà saisies dans ce thème seront remplacées.', 'Tout en N/A', 'primary')) return;
+    for (const c of th.criteria) sc(c.ref).v = allNA ? null : NA;
+    await db.put('inspections', insp); toast(allNA ? 'Thème réactivé' : 'Thème entier en N/A'); render();
+  });
   view.addEventListener('click', async e => {
     const card = e.target.closest('.crit'); if (!card) return;
     const cref = card.dataset.ref;
@@ -1185,7 +1199,7 @@ async function vSummary(id) {
       <div class="ref-line"><span class="muted small">Référence</span><b>${esc(insp.ref)}</b></div>
       <label class="f">Projet / chantier</label><input class="in" data-k="site" value="${esc(insp.site || '')}">
       <label class="f">Date de l’audit</label><input class="in" type="date" data-k="date" value="${esc(insp.date)}">
-      <label class="f">Inspecteur(s)</label><input class="in" data-k="inspectors" value="${esc(insp.inspectors || '')}">
+      <label class="f">Inspecteur(s)</label><input class="in" data-k="inspectors" list="hse-list" value="${esc(insp.inspectors || '')}" autocomplete="off">
       <div class="btns" style="margin-bottom:0"><div><label class="f">Bonus BE SAFE</label><input class="in" type="number" inputmode="decimal" step="0.5" data-k="bonus" value="${Number(insp.bonus) || 0}"></div>
       <div><label class="f">Pénalité LSR</label><input class="in" type="number" inputmode="decimal" step="0.5" data-k="penalty" value="${Number(insp.penalty) || 0}"></div></div>
     </div>`;
@@ -1450,14 +1464,15 @@ async function vAction(id) {
       </div>
     </div>
 
-    <div class="section-head"><span>Après correction</span><span class="muted small">${(a.photosAfter || []).length || ''}</span></div>
+    <div id="after-sec" ${a.status === 'Closed' || (a.photosAfter || []).length ? '' : 'hidden'}><div class="section-head"><span>Après correction</span><span class="muted small">${(a.photosAfter || []).length || ''}</span></div>
     <div class="card">
       <label class="btn block">${ic('camera')} Photo après correction<input type="file" accept="image/*" capture="environment" class="hidden-input" id="a-after"></label>
       <div class="thumbs" id="a-after-thumbs"></div>
-    </div>
+    </div></div>
 
     <div class="section-head"><span>Emplacement</span><span class="muted small">${a.planId ? esc(plans[a.planId]?.name || '') : ''}</span></div>
     ${a.planId && plans[a.planId] ? `<div id="a-plan" class="pv plan-box" style="height:38vh"></div>
+      <div class="plan-legend"><span><i class="lg-zone"></i>Zone auditée${insp?.zone ? ' · ' + esc(insp.zone) : ''}</span><span><i class="lg-act">!</i>Cette action</span></div>
       <button class="btn block" id="mv" style="margin-top:8px">${a.pin ? 'Déplacer l’épingle' : 'Placer l’épingle'}</button>` : '<div class="muted">Aucun plan lié</div>'}
     <button class="btn danger block" id="del" style="margin-top:20px">${ic('trash')} Supprimer l’action</button>
     <p class="muted small" style="text-align:center">Enregistrement automatique</p>`;
@@ -1470,7 +1485,7 @@ async function vAction(id) {
   }
   const drawThumbs = async () => { $('#a-thumbs').innerHTML = await thumbsHTML(a.photos); $('#a-after-thumbs').innerHTML = await thumbsHTML(a.photosAfter); };
   drawThumbs();
-  const addAfter = async files => { toast('Compression…'); a.photosAfter = [...(a.photosAfter || []), ...await addPhotos(files)]; save.flush(); drawThumbs(); toast('Photo après correction ajoutée'); };
+  const addAfter = async files => { const as = $('#after-sec'); if (as) as.hidden = false; toast('Compression…'); a.photosAfter = [...(a.photosAfter || []), ...await addPhotos(files)]; save.flush(); drawThumbs(); toast('Photo après correction ajoutée'); };
   let shareFiles = [];
   const sharePh = (await getSettings()).sharePhotos !== false;
   if (sharePh) actionFiles(a).then(f => { shareFiles = f; });
@@ -1492,6 +1507,7 @@ async function vAction(id) {
       const key = sb.closest('[data-seg]').dataset.seg;
       a[key] = sb.dataset.val;
       sb.parentElement.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === sb));
+      if (key === 'status') { const as = $('#after-sec'); if (as) as.hidden = a.status !== 'Closed' && !(a.photosAfter || []).length; }
       if (key === 'status' && a.status === 'Closed') { a.closedAt = todayISO(); if (!(a.photosAfter || []).length && cloud.can('actions')) afterPhotoSheet(addAfter); }
       save.flush();
       const head = view.querySelector('.act-head');
@@ -1511,18 +1527,23 @@ async function vAction(id) {
   if (a.planId && plans[a.planId]) {
     let moving = false;
     const color = subs[a.subId]?.color;
-    const pins = () => [...(insp?.pin && insp.planId === a.planId ? [{ id: 'i', ...insp.pin, color, label: 'I' }] : []), ...(a.pin ? [{ id: 'a', ...a.pin, color, label: '!', kind: 'action', ghost: moving }] : [])];
+    const sameP = insp && insp.planId === a.planId;
+    const iz = insp && !subIdsOf(insp).length;
+    const hasArea = sameP && insp.area?.pts?.length > 2;
+    const pins = () => [...(sameP && insp.pin && !hasArea ? [{ id: 'i', ...insp.pin, color: iz ? '#0B2D5B' : (subs[insp.subId]?.color || color), label: iz ? 'ZON' : abbr(subs[insp.subId]?.name) }] : []), ...(a.pin ? [{ id: 'a', ...a.pin, label: '!', kind: 'action', ghost: moving }] : [])];
     const pv = createPlanViewer($('#a-plan'), {
       imageURL: await db.blobURL(plans[a.planId].blobId), pins: pins(), focus: a.pin || insp?.pin,
+      areas: hasArea ? [{ id: 'ia', pts: insp.area.pts, kind: 'area', color: '#1A56A8' }] : [], // le nom est dans la légende : rien ne passe sous l'épingle
       onTap: (x, y) => { if (!moving) return; a.pin = { x, y }; moving = false; $('#mv').textContent = 'Déplacer l’épingle'; $('#mv').classList.remove('primary'); pv.setPins(pins()); save.flush(); toast('Épingle déplacée'); },
     });
     onCleanup(() => pv.destroy());
+    if (hasArea) setTimeout(() => pv.focusArea([...insp.area.pts, ...(a.pin ? [a.pin] : [])]), 200);
     if ($('#mv')) $('#mv').onclick = e => { moving = !moving; e.target.textContent = moving ? 'Tapez l’emplacement sur le plan…' : (a.pin ? 'Déplacer l’épingle' : 'Placer l’épingle'); e.target.classList.toggle('primary', moving); pv.setPins(pins()); };
   }
 }
 
 // ---------- carte / plan ----------
-let mapSub = '', mapActions = false;
+const mapF = { view: 'audits', period: 30, sub: '' };
 async function vMap(q) {
   view.classList.add('full', 'map-page');
   const { subs, subList, plans, planList } = await maps();
@@ -1534,41 +1555,111 @@ async function vMap(q) {
   const [insps, acts] = await Promise.all([pAll('inspections'), pAll('actions')]);
   const team = cloud.can('team') ? (await cloud.teamAudits()).filter(a => (!PROJECT || a.projectId === PROJECT.id)) : [];
   const active = subList.filter(s => !s.archived).sort((a, b) => a.name.localeCompare(b.name));
+  const pctOf = i => overallScore(i.scores, i.bonus, i.penalty).pct;
+  const VIEWS = [['audits', 'Audits'], ['actions', 'Actions'], ['zones', 'Zones · score']];
   view.innerHTML = `
-    <div class="chips-bar">
-      <button data-ms="" class="${!mapSub ? 'on' : ''}">Tous</button>
-      ${active.map(s => `<button data-ms="${s.id}" class="${mapSub === s.id ? 'on' : ''}" style="--c:${esc(s.color)}"><i></i>${esc(s.name)}</button>`).join('')}
+    <div class="map-bar">
+      ${onlyInsp || onlyTeam ? `<div class="map-only"><span class="grow"><b>Un seul audit affiché</b></span><a class="btn small-btn" href="#/map?plan=${planId}">Tout afficher</a></div>` : `
+      <div class="seg map-views">${VIEWS.map(([k, l]) => `<button data-mv="${k}" class="${mapF.view === k ? 'on' : ''}">${l}</button>`).join('')}</div>
+      <div class="map-sels">
+        <select class="in f-sel" id="m-per">${[[7, '7 jours'], [30, '30 jours'], [90, '3 mois'], [0, 'Depuis le début']].map(([v, l]) => `<option value="${v}" ${mapF.period === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+        <select class="in f-sel ${mapF.sub ? 'set' : ''}" id="m-sub"><option value="">Entreprises</option>${active.map(s => `<option value="${s.id}" ${mapF.sub === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>
+        ${planList.length > 1 ? `<select class="in f-sel" id="m-plan">${planList.map(p => `<option value="${p.id}" ${p.id === planId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
+      </div>`}
     </div>
-    ${planList.length > 1 ? `<select class="in" id="m-plan" style="margin:0 12px 8px;width:calc(100% - 24px)">${planList.map(p => `<option value="${p.id}" ${p.id === planId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
     <div id="map" class="pv map-fill"></div>
-    <button class="map-toggle ${mapActions ? 'on' : ''}" id="m-act">${ic('list', 18)}<span>${mapActions ? 'Masquer les actions' : 'Afficher les actions'}</span></button>`;
-  const computePins = () => {
-    const out = [];
-    insps.filter(i => i.planId === planId && i.pin && (!mapSub || hasSub(i, mapSub)) && (!onlyInsp || i.id === onlyInsp))
-      .forEach(i => out.push({ id: 'i:' + i.id, ...i.pin, color: auditColor(i, subs), label: auditAbbr(i, subs) }));
-    team.filter(a => a.planId === planId && a.pin && (!mapSub || (a.subIds || []).includes(mapSub)) && (!onlyInsp || a.id === onlyTeam) && (!onlyTeam || a.id === onlyTeam))
-      .forEach(a => out.push({ id: 't:' + a.id, ...a.pin, color: teamColor(a, subs), label: (a.subIds || []).length === 1 ? abbr(subs[a.subIds[0]]?.name) : 'ZON', ghost: true }));
-    if (mapActions || onlyInsp) acts.filter(a => a.planId === planId && a.pin && a.status !== 'Closed' && (!mapSub || a.subId === mapSub) && (!onlyInsp || a.inspectionId === onlyInsp))
-      .forEach(a => out.push({ id: 'a:' + a.id, ...a.pin, color: subs[a.subId]?.color, label: '!', kind: 'action' }));
+    <div class="map-key" id="m-key"></div>`;
+  // le plan occupe exactement la place restante (la barre de filtres peut faire 1 ou 2 lignes)
+  const sizeMap = () => {
+    const m = $('#map'); if (!m) return;
+    const tb = document.getElementById('tabbar')?.getBoundingClientRect();
+    const bottom = tb && tb.top > innerHeight / 2 ? innerHeight - tb.top : 0;
+    m.style.height = Math.max(260, innerHeight - m.getBoundingClientRect().top - window.scrollY * 0 - bottom - 2) + 'px';
+  };
+  sizeMap(); addEventListener('resize', sizeMap); onCleanup(() => removeEventListener('resize', sizeMap));
+
+  const since = () => mapF.period ? todayISO(-mapF.period) : '0000';
+  const visible = () => insps.filter(i => i.planId === planId && (onlyInsp ? i.id === onlyInsp : !onlyTeam && i.date >= since() && (!mapF.sub || hasSub(i, mapF.sub))));
+  const areaKey = i => i.area?.pts?.length > 2 ? 'a:' + (i.area.zoneId || JSON.stringify(i.area.pts)) : null;
+  /** « lieux » : une zone tracée (toutes les tournées qui y ont eu lieu), ou une tournée / un audit placé par une épingle */
+  const places = () => {
+    const m = new Map();
+    for (const i of visible()) {
+      if (!i.pin && !areaKey(i)) continue;
+      const k = areaKey(i) || 'v:' + (i.visitId || i.id);
+      const e = m.get(k) || { k, list: [], area: null, pin: null };
+      e.list.push(i);
+      if (!e.area && areaKey(i)) e.area = i.area;
+      if (!subIdsOf(i).length && i.pin) e.pin = i.pin; else e.pin ||= i.pin;
+      m.set(k, e);
+    }
+    return [...m.values()].map(e => {
+      e.list.sort((a, b) => (b.date + (b.updatedAt || '')).localeCompare(a.date + (a.updatedAt || '')));
+      e.zone = e.list.find(i => i.zone)?.zone || e.area?.name || '';
+      // score de la zone : dernier audit noté
+      const lastScored = e.list.find(i => pctOf(i) !== null); e.pct = lastScored ? pctOf(lastScored) : null;
+      const comp = e.list.filter(i => subIdsOf(i).length);
+      e.n = Math.max(1, comp.length); return e;
+    });
+  };
+  const planZones = () => plans[planId].zones || [];
+  const computeAreas = () => {
+    const ps = places(), used = new Set(ps.map(e => e.area?.zoneId).filter(Boolean));
+    const zonesView = mapF.view === 'zones';
+    const out = planZones().filter(z => !used.has(z.id)).map(z => ({ id: 'z:' + z.id, pts: z.pts, kind: 'zone', label: zonesView ? z.name : '', color: '#607D8B' }));
+    if (mapF.view === 'actions' && !onlyInsp) return out;
+    for (const e of ps) if (e.area) {
+      const one = e.list.length === 1 ? e.list[0] : null;
+      const color = zonesView ? (e.pct === null ? '#9E9E9E' : rating(e.pct).color) : one && subIdsOf(one).length ? auditColor(one, subs) : '#1A56A8';
+      const label = zonesView ? `${e.zone || 'Zone'} · ${e.pct === null ? '—' : Math.round(e.pct * 100) + ' %'}` : `${e.zone || 'Zone'}${e.list.length > 1 ? ' · ' + e.list.length : ''}`;
+      out.push({ id: 'p:' + e.k, pts: e.area.pts, kind: zonesView ? 'score' : 'area', color, label, tap: true });
+    }
+    team.filter(a => !onlyInsp && a.planId === planId && a.area?.pts && (onlyTeam ? a.id === onlyTeam : a.date >= since() && (!mapF.sub || (a.subIds || []).includes(mapF.sub))))
+      .forEach(a => out.push({ id: 'ta:' + a.id, pts: a.area.pts, kind: 'team', color: teamColor(a, subs) }));
     return out;
   };
-  // une zone partagée par plusieurs audits (tournée) n'est dessinée qu'une fois ; les épingles montrent les entreprises
-  const computeAreas = () => {
-    const groups = new Map();
-    insps.filter(i => i.planId === planId && i.area?.pts && (!mapSub || hasSub(i, mapSub)) && (!onlyInsp || i.id === onlyInsp))
-      .forEach(i => { const k = i.area.zoneId || JSON.stringify(i.area.pts); (groups.get(k) || groups.set(k, []).get(k)).push(i); });
-    const used = new Set([...groups.values()].map(g => g[0].area.zoneId).filter(Boolean));
-    return [
-      ...(plans[planId].zones || []).filter(z => !used.has(z.id)).map(z => ({ id: 'z:' + z.id, pts: z.pts, kind: 'zone', label: z.name })),
-      ...team.filter(a => a.planId === planId && a.area?.pts && (!mapSub || (a.subIds || []).includes(mapSub)) && (!onlyTeam || a.id === onlyTeam))
-        .map(a => ({ id: 'ta:' + a.id, pts: a.area.pts, kind: 'team', color: teamColor(a, subs) })),
-      ...[...groups.values()].map(g => { const cols = new Set(g.map(i => auditColor(i, subs))); return { id: 'ia:' + g[0].id, pts: g[0].area.pts, kind: 'area', color: cols.size === 1 ? [...cols][0] : '#1A56A8', label: g[0].area.name || g[0].zone || '' }; }),
-    ];
+  const computePins = () => {
+    const out = [];
+    if (onlyInsp) {
+      insps.filter(i => i.id === onlyInsp && i.pin && !areaKey(i)).forEach(i => out.push({ id: 'i:' + i.id, ...i.pin, color: auditColor(i, subs), label: auditAbbr(i, subs) }));
+      acts.filter(a => a.planId === planId && a.pin && a.inspectionId === onlyInsp).forEach(a => out.push({ id: 'a:' + a.id, ...a.pin, label: '!', kind: 'action' }));
+      return out;
+    }
+    if (mapF.view === 'actions') {
+      acts.filter(a => a.planId === planId && a.pin && a.status !== 'Closed' && (!mapF.sub || a.subId === mapF.sub))
+        .forEach(a => out.push({ id: 'a:' + a.id, ...a.pin, label: '!', kind: 'action' }));
+      return out;
+    }
+    for (const e of places()) if (!e.area && e.pin) {
+      const one = e.list.length === 1 ? e.list[0] : null;
+      if (mapF.view === 'zones') out.push({ id: 'p:' + e.k, ...e.pin, fixed: true, color: e.pct === null ? '#9E9E9E' : rating(e.pct).color, label: e.pct === null ? '—' : Math.round(e.pct * 100) });
+      else out.push({ id: one ? 'i:' + one.id : 'p:' + e.k, ...e.pin, fixed: !one, count: e.list.length, color: one ? auditColor(one, subs) : '#0B2D5B', label: one ? auditAbbr(one, subs) : String(e.list.length) });
+    }
+    if (mapF.view === 'audits') team.filter(a => a.planId === planId && a.pin && !a.area?.pts && (onlyTeam ? a.id === onlyTeam : a.date >= since() && (!mapF.sub || (a.subIds || []).includes(mapF.sub))))
+      .forEach(a => out.push({ id: 't:' + a.id, ...a.pin, fixed: true, color: teamColor(a, subs), label: (a.subIds || []).length === 1 ? abbr(subs[a.subIds[0]]?.name) : 'ZON', ghost: true }));
+    return out;
+  };
+  const drawKey = () => {
+    const ps = places(), nA = ps.reduce((a, e) => a + e.list.length, 0);
+    const nAct = acts.filter(a => a.planId === planId && a.pin && a.status !== 'Closed' && (!mapF.sub || a.subId === mapF.sub)).length;
+    const k = $('#m-key'); if (!k) return;
+    k.innerHTML = onlyInsp || onlyTeam ? '' : mapF.view === 'zones'
+      ? `${RATINGS.map((r, k) => `<span><i style="background:${r.color}"></i>${['≥ 90 %', '80–89', '70–79', '50–69', '< 50 %'][k]}</span>`).join('')}<span><i style="background:#9E9E9E"></i>non noté</span>`
+      : mapF.view === 'actions' ? `<span><i class="k-act">!</i>${nAct} action${nAct > 1 ? 's' : ''} ouverte${nAct > 1 ? 's' : ''}</span>`
+      : `<span><b>${nA}</b> audit${nA > 1 ? 's' : ''} · ${ps.length} lieu${ps.length > 1 ? 'x' : ''}</span><span class="muted">bulle = audits regroupés · touchez pour zoomer</span>`;
+  };
+  const placeSheet = k => {
+    const e = places().find(x => x.k === k); if (!e) return;
+    openSheet(`<h3>${esc(e.zone || 'Lieu')}</h3>
+      <div class="row"><span class="grow muted">${e.list.length} audit${e.list.length > 1 ? 's' : ''} sur la période${e.pct === null ? '' : ' · dernier score'}</span>${e.pct === null ? '' : badge(e.pct)}</div>
+      <div class="place-list">${inspList(e.list, subs)}</div>
+      <button class="btn block" data-close style="margin-top:10px">Fermer</button>`, el => el.querySelectorAll('a').forEach(a => a.setAttribute('data-close', '')));
   };
   const pv = createPlanViewer($('#map'), {
-    imageURL: await db.blobURL(plans[planId].blobId), pins: computePins(), areas: computeAreas(), cover: 2.4,
-    focus: onlyInsp ? insps.find(i => i.id === onlyInsp)?.pin : onlyTeam ? team.find(a => a.id === onlyTeam)?.pin : null,
-    onPinTap: p => p.id.startsWith('t:') ? teamSheet(team.find(a => a.id === p.id.slice(2)), subs) : pinSheet(p.id, { subs, insps, acts }),
+    imageURL: await db.blobURL(plans[planId].blobId), pins: computePins(), areas: computeAreas(), cover: 6, cluster: !onlyInsp,
+    focus: onlyInsp ? (insps.find(i => i.id === onlyInsp)?.pin) : onlyTeam ? team.find(a => a.id === onlyTeam)?.pin : null,
+    onPinTap: p => p.id.startsWith('t:') ? teamSheet(team.find(a => a.id === p.id.slice(2)), subs) : p.id.startsWith('p:') ? placeSheet(p.id.slice(2)) : pinSheet(p.id, { subs, insps, acts }),
+    onZoneTap: (z, x, y) => z.id.startsWith('p:') ? placeSheet(z.id.slice(2)) : z.id.startsWith('ta:') ? teamSheet(team.find(a => a.id === z.id.slice(3)), subs) : newObservationHere(planId, { x, y }, subList),
     // appui long sur une épingle puis glisser : on la déplace
     onPinMove: cloud.can('actions') ? async (p, x, y) => {
       const [kind, id] = p.id.split(':');
@@ -1580,19 +1671,17 @@ async function vMap(q) {
     onTap: (x, y) => newObservationHere(planId, { x, y }, subList),
   });
   onCleanup(() => pv.destroy());
-  view.querySelector('.chips-bar').onclick = e => {
-    const b = e.target.closest('[data-ms]'); if (!b) return;
-    mapSub = b.dataset.ms;
-    view.querySelectorAll('[data-ms]').forEach(x => x.classList.toggle('on', x === b));
-    pv.setPins(computePins()); pv.setAreas(computeAreas());
-  };
+  if (onlyInsp) { const ia = insps.find(i => i.id === onlyInsp)?.area?.pts; if (ia) setTimeout(() => pv.focusArea(ia), 150); }
+  const redraw = () => { pv.setPins(computePins()); pv.setAreas(computeAreas()); drawKey(); };
+  drawKey();
+  view.querySelector('.map-views')?.addEventListener('click', e => {
+    const b = e.target.closest('[data-mv]'); if (!b) return;
+    mapF.view = b.dataset.mv; view.querySelectorAll('[data-mv]').forEach(x => x.classList.toggle('on', x === b));
+    $('#m-per').disabled = mapF.view === 'actions'; redraw();
+  });
+  if ($('#m-per')) { $('#m-per').disabled = mapF.view === 'actions'; $('#m-per').onchange = e => { mapF.period = +e.target.value; redraw(); }; }
+  $('#m-sub')?.addEventListener('change', e => { mapF.sub = e.target.value; e.target.classList.toggle('set', !!mapF.sub); redraw(); });
   $('#m-plan')?.addEventListener('change', e => { location.hash = '#/map?plan=' + e.target.value; });
-  $('#m-act').onclick = e => {
-    mapActions = !mapActions;
-    const b = e.currentTarget; b.classList.toggle('on', mapActions);
-    b.querySelector('span').textContent = mapActions ? 'Masquer les actions' : 'Afficher les actions';
-    pv.setPins(computePins());
-  };
 }
 function pinSheet(pid, { subs, insps, acts }) {
   const [kind, id] = pid.split(':');
@@ -1659,50 +1748,102 @@ async function vTeamAudits() {
     ${groups.map(([label, f]) => { const g = list.filter(f); return g.length ? `<div class="section-head"><span>${label}</span><span class="muted small">${g.length}</span></div>${g.map(a => teamCard(a, subs)).join('')}` : ''; }).join('') || '<div class="empty">Aucun audit de l’équipe pour le moment.</div>'}`;
   view.addEventListener('click', e => { const b = e.target.closest('[data-team]'); if (b) teamSheet(list.find(a => a.id === b.dataset.team), subs); });
 }
-async function vAudits() {
+// HSE : un même nom tapé différemment (« axel » / « Axel ») = une seule personne
+const hseKey = n => (n || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+const hseSplit = s => (s || '').split(/\s*(?:,|;|\/|&|\bet\b)\s*/i).map(x => x.trim()).filter(Boolean);
+const titleCase = n => n.replace(/(^|[\s'-])(\p{L})/gu, (m, a, b) => a + b.toUpperCase());
+/** Nom d'affichage : la variante écrite avec majuscule la plus fréquente */
+function hseNames(list, namesOf) {
+  const m = new Map();
+  list.forEach(i => [...new Set(namesOf(i))].forEach(n => { const k = hseKey(n); if (!k) return; const e = m.get(k) || { k, v: new Map(), l: [] }; e.v.set(n, (e.v.get(n) || 0) + 1); e.l.push(i); m.set(k, e); }));
+  return [...m.values()].map(e => { const v = [...e.v.entries()].sort((a, b) => (/\p{Lu}/u.test(b[0]) - /\p{Lu}/u.test(a[0])) || b[1] - a[1])[0][0]; return { k: e.k, n: /\p{Lu}/u.test(v) ? v : titleCase(v), l: e.l }; });
+}
+const auditF = { q: '', st: '', sub: '', hse: '' };
+const openMonths = new Set();
+const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
+async function vAudits(q) {
   setTop({ title: 'Audits' });
+  if (q?.get('hse') !== null && q?.get('hse') !== undefined) { auditF.hse = q.get('hse'); auditF.sub = ''; auditF.st = ''; }
+  if (auditSub) { auditF.sub = auditSub; auditSub = ''; }
   const [{ subs, subList }, insps] = await Promise.all([maps(), pAll('inspections')]);
   const active = subList.filter(s => s.name && !s.archived).sort((a, b) => a.name.localeCompare(b.name));
+  const people = hseNames(insps, i => hseSplit(i.inspectors)).sort((a, b) => a.n.localeCompare(b.n));
+  const info = new Map(insps.map(i => [i.id, auditState(i)]));
+  const today = todayISO(), week = todayISO(-6), thisMonth = today.slice(0, 7);
+  // brouillons oubliés : rien noté depuis plus de 2 jours → rangés à part
+  const staleDraft = i => info.get(i.id).st === 'draft' && i.date < todayISO(-2);
+  const text = i => hseKey([auditLabel(i, subs), i.zone, i.ref, i.inspectors].join(' '));
   const draw = () => {
-    const list = insps.filter(i => !auditSub || hasSub(i, auditSub)).sort((a, b) => (b.date + (b.updatedAt || '')).localeCompare(a.date + (a.updatedAt || '')));
-    const today = todayISO(), week = todayISO(-7), month = todayISO(-31);
-    const groups = [['Aujourd’hui', i => i.date === today], ['Cette semaine', i => i.date < today && i.date >= week], ['Ce mois-ci', i => i.date < week && i.date >= month], ['Plus ancien', i => i.date < month]];
-    $('#alist').innerHTML = groups.map(([label, f]) => {
-      const g = list.filter(f); if (!g.length) return '';
-      return `<div class="section-head"><span>${label}</span><span class="muted small">${g.length}</span></div>${inspList(g, subs)}`;
-    }).join('') || '<div class="empty">Aucun audit</div>';
+    const qk = hseKey(auditF.q);
+    const base = insps.filter(i => (!auditF.sub || hasSub(i, auditF.sub)) && (!auditF.hse || hseSplit(i.inspectors).some(n => hseKey(n) === auditF.hse)) && (!qk || text(i).includes(qk)));
+    const counts = { '': base.filter(i => !staleDraft(i)).length, wip: 0, done: 0, draft: 0 };
+    base.forEach(i => counts[info.get(i.id).st]++);
+    $('#a-st').innerHTML = [['', 'Tous'], ['wip', 'En cours'], ['done', 'Terminés'], ['draft', 'Brouillons']].map(([k, l]) => `<button data-st="${k}" class="${auditF.st === k ? 'on' : ''}">${l}<em>${counts[k]}</em></button>`).join('');
+    const list = base.filter(i => auditF.st ? info.get(i.id).st === auditF.st : !staleDraft(i)).sort((a, b) => (b.date + (b.updatedAt || '')).localeCompare(a.date + (a.updatedAt || '')));
+    // tranches : aujourd'hui, 7 derniers jours, puis un bloc par mois (les mois passés sont repliés)
+    const buckets = new Map();
+    list.forEach(i => {
+      const k = i.date === today ? 'today' : i.date >= week ? 'week' : i.date.slice(0, 7);
+      (buckets.get(k) || buckets.set(k, []).get(k)).push(i);
+    });
+    const search = !!(qk || auditF.hse || auditF.sub || auditF.st);
+    const html = [...buckets.entries()].map(([k, g]) => {
+      const label = k === 'today' ? 'Aujourd’hui' : k === 'week' ? '7 derniers jours' : k === thisMonth ? 'Plus tôt ce mois-ci' : `${MONTHS[+k.slice(5, 7) - 1]} ${k.slice(0, 4)}`;
+      const scores = g.map(i => info.get(i.id).o.pct).filter(x => x !== null);
+      const avgTxt = scores.length ? ` · moyenne ${Math.round(scores.reduce((a, b) => a + b, 0) / scores.length * 100)} %` : '';
+      const fold = k.length === 7 && k !== thisMonth && !search && !openMonths.has(k);
+      if (fold) return `<button type="button" class="card month-fold" data-m="${k}"><span class="grow"><b>${label}</b><small>${g.length} audit${g.length > 1 ? 's' : ''}${avgTxt}</small></span>${ic('chevron')}</button>`;
+      return `<div class="section-head"><span>${label}</span><span class="muted small">${g.length}${k.length === 7 ? avgTxt : ''}</span></div>${inspList(g, subs)}`;
+    }).join('');
+    const stale = !auditF.st ? base.filter(staleDraft) : [];
+    $('#alist').innerHTML = (html || `<div class="empty">${search ? 'Aucun audit ne correspond' : 'Aucun audit'}</div>`) +
+      (stale.length ? `<button type="button" class="card month-fold drafts-fold" data-st-go="draft"><span class="grow"><b>${stale.length} brouillon${stale.length > 1 ? 's' : ''} oublié${stale.length > 1 ? 's' : ''}</b><small>Commencés mais rien de noté depuis plus de 2 jours</small></span>${ic('chevron')}</button>` : '') +
+      (auditF.st === 'draft' && base.some(staleDraft) ? `<button class="btn block danger" id="a-purge" style="margin-top:12px">${ic('trash')} Supprimer les brouillons de plus de 2 jours</button>` : '');
   };
+  const sel = (id, all, opts, v) => `<select class="in f-sel ${v ? 'set' : ''}" id="${id}"><option value="">${all}</option>${opts.map(([k, l]) => `<option value="${esc(k)}" ${k === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
   view.innerHTML = `
     ${auditTabs('date')}
-    <div class="chips-bar flush">
-      <button data-as="" class="${!auditSub ? 'on' : ''}">Tous</button>
-      ${active.map(s => `<button data-as="${s.id}" class="${auditSub === s.id ? 'on' : ''}" style="--c:${esc(s.color)}"><i></i>${esc(s.name)}</button>`).join('')}
+    <div class="a-search">${ic('search', 18)}<input class="in" id="a-q" type="search" placeholder="Entreprise, zone, référence…" value="${esc(auditF.q)}" autocomplete="off"></div>
+    <div class="a-filters">
+      ${sel('a-sub', 'Entreprises', active.map(s => [s.id, s.name]), auditF.sub)}
+      ${people.length > 1 || auditF.hse ? sel('a-hse', 'Tous les HSE', people.map(p => [p.k, p.n]), auditF.hse) : ''}
     </div>
+    <div class="seg a-st" id="a-st"></div>
     <div id="alist"></div>`;
   draw();
-  view.querySelector('.chips-bar').onclick = e => {
-    const b = e.target.closest('[data-as]'); if (!b) return;
-    auditSub = b.dataset.as;
-    view.querySelectorAll('[data-as]').forEach(x => x.classList.toggle('on', x === b));
-    draw();
-  };
+  let qt; $('#a-q').addEventListener('input', e => { clearTimeout(qt); qt = setTimeout(() => { auditF.q = e.target.value; draw(); }, 200); });
+  $('#a-sub').onchange = e => { auditF.sub = e.target.value; e.target.classList.toggle('set', !!e.target.value); draw(); };
+  $('#a-hse') && ($('#a-hse').onchange = e => { auditF.hse = e.target.value; e.target.classList.toggle('set', !!e.target.value); draw(); });
+  view.addEventListener('click', async e => {
+    const st = e.target.closest('[data-st]'); if (st) { auditF.st = st.dataset.st; draw(); return; }
+    const go = e.target.closest('[data-st-go]'); if (go) { auditF.st = go.dataset.stGo; draw(); window.scrollTo(0, 0); return; }
+    const m = e.target.closest('[data-m]'); if (m) { openMonths.add(m.dataset.m); draw(); return; }
+    if (e.target.closest('#a-purge')) {
+      const old = insps.filter(staleDraft);
+      if (!await confirmBox(`Supprimer ${old.length} brouillon${old.length > 1 ? 's' : ''} ?`, 'Audits commencés il y a plus de 2 jours sans aucun critère noté.', 'Supprimer')) return;
+      for (const i of old) await deleteInspection(i.id);
+      toast('Brouillons supprimés'); render();
+    }
+  });
 }
 
 async function vSubs() {
   setTop({ title: 'Audits', actions: cloud.isAdmin() ? [{ icon: 'plus', aria: 'Ajouter', onClick: newSub }] : [] });
   const [{ subList: subs }, insps, acts] = await Promise.all([maps(), pAll('inspections'), pAll('actions')]);
   const rows = subs.filter(s => showArchived || !s.archived).map(s => {
-    const last = insps.filter(i => hasSub(i, s.id)).sort((a, b) => b.date.localeCompare(a.date))[0];
-    return { s, pct: last ? overallScore(last.scores, last.bonus, last.penalty).pct : null, open: acts.filter(a => a.subId === s.id && a.status !== 'Closed').length, late: acts.filter(a => a.subId === s.id && isLate(a)).length };
+    const mine = insps.filter(i => hasSub(i, s.id)).map(i => ({ i, pct: overallScore(i.scores, i.bonus, i.penalty).pct })).filter(x => x.pct !== null).sort((a, b) => b.i.date.localeCompare(a.i.date));
+    const last = mine[0]?.i, prev = mine[1];
+    return { s, n: mine.length, last, trend: prev ? Math.round((mine[0].pct - prev.pct) * 100) : null, pct: mine[0]?.pct ?? null, open: acts.filter(a => a.subId === s.id && a.status !== 'Closed').length, late: acts.filter(a => a.subId === s.id && isLate(a)).length };
   }).sort((a, b) => (b.pct ?? -1) - (a.pct ?? -1) || a.s.name.localeCompare(b.s.name));
   let rank = 0;
   view.innerHTML = `
     ${auditTabs('sub')}
     <div class="section-head"><span>Classement — dernier audit</span></div>
-    ${rows.map(({ s, pct, open, late }) => `<a class="card link row sub-row" href="#/sub/${s.id}" style="--c:${esc(s.color)};${s.archived ? 'opacity:.5' : ''}">
+    ${rows.map(({ s, pct, open, late, n, last, trend }) => `<a class="card link row sub-row" href="#/sub/${s.id}" style="--c:${esc(s.color)};${s.archived ? 'opacity:.5' : ''}">
         <span class="rank">${pct === null ? '–' : ++rank}</span>
         <div class="grow"><b>${esc(s.name || 'Sans nom')}</b>
-          <div class="small ${late ? 'late' : 'muted'}">${open ? `${open} action${open > 1 ? 's' : ''} ouverte${open > 1 ? 's' : ''}${late ? ` · ${late} en retard` : ''}` : (pct === null ? 'Pas encore audité' : 'Aucune action ouverte')}</div></div>
+          <div class="small muted">${n ? `${n} audit${n > 1 ? 's' : ''} · dernier le ${dateFR(last.date).slice(0, 5)}` : 'Pas encore audité'}${trend !== null && trend !== 0 ? ` · <span class="trend ${trend > 0 ? 'up' : 'down'}">${trend > 0 ? '▲ +' : '▼ '}${trend} pts</span>` : ''}</div>
+          ${open ? `<div class="small ${late ? 'late' : 'muted'}">${open} action${open > 1 ? 's' : ''} ouverte${open > 1 ? 's' : ''}${late ? ` · ${late} en retard` : ''}</div>` : ''}</div>
         ${pct === null ? '' : badge(pct)}</a>`).join('') || '<div class="empty">Aucune entreprise</div>'}
     <div class="row" style="justify-content:space-between;margin:14px 4px">
       <label class="row small" style="gap:8px"><input type="checkbox" id="arch" ${showArchived ? 'checked' : ''} style="width:22px;height:22px"> Archivés</label>
@@ -1799,14 +1940,14 @@ async function vSub(id) {
 function scoreBars(pts) {
   const v = pts.filter(p => p.pct !== null).slice(-8);
   if (!v.length) return '<div class="empty">Pas encore de score</div>';
-  const w = 340, h = 190, L = 30, R = 8, T = 18, B = 24, bw = Math.min(34, (w - L - R) / v.length - 10);
+  const w = 340, h = 200, L = 34, R = 6, T = 22, B = 26, bw = Math.min(34, (w - L - R) / v.length - 10);
   const y = p => T + (1 - p) * (h - T - B);
   const x = i => L + (i + 0.5) * (w - L - R) / v.length;
   return `<svg viewBox="0 0 ${w} ${h}" class="chart-box" role="img" aria-label="Évolution du score">
-    ${[0, 0.5, 0.7, 0.8, 0.9, 1].map(t => `<line x1="${L}" x2="${w - R}" y1="${y(t)}" y2="${y(t)}" stroke="var(--line)" ${t ? 'stroke-dasharray="3 3"' : ''}/><text x="${L - 4}" y="${y(t) + 3}" font-size="9" text-anchor="end" opacity=".7">${t * 100}</text>`).join('')}
+    ${[0, 0.5, 0.8, 1].map(t => `<line x1="${L}" x2="${w - R}" y1="${y(t)}" y2="${y(t)}" stroke="var(--line)" ${t ? 'stroke-dasharray="3 3"' : ''}/><text x="${L - 5}" y="${y(t) + 4}" font-size="12" text-anchor="end" opacity=".75">${t * 100}</text>`).join('')}
     ${v.map((p, i) => `<rect x="${x(i) - bw / 2}" y="${y(p.pct)}" width="${bw}" height="${y(0) - y(p.pct)}" rx="4" fill="${rating(p.pct).color}"/>
-      <text x="${x(i)}" y="${y(p.pct) - 4}" font-size="10.5" font-weight="700" text-anchor="middle">${Math.round(p.pct * 100)}%</text>
-      <text x="${x(i)}" y="${h - 8}" font-size="9" text-anchor="middle" opacity=".8">${p.i.date.slice(5).split('-').reverse().join('/')}</text>`).join('')}
+      <text x="${x(i)}" y="${y(p.pct) - 5}" font-size="13" font-weight="800" text-anchor="middle">${Math.round(p.pct * 100)}</text>
+      <text x="${x(i)}" y="${h - 7}" font-size="12" text-anchor="middle" opacity=".8">${p.i.date.slice(5).split('-').reverse().join('/')}</text>`).join('')}
   </svg>`;
 }
 
@@ -1927,9 +2068,11 @@ async function vProject(id) {
         <div><label class="f">Code (références)</label><input class="in" data-k="code" value="${esc(p.code)}" placeholder="SAM3" style="text-transform:uppercase"></div>
         <div><label class="f">Site</label><input class="in" data-k="site" value="${esc(p.site)}" placeholder="Farciennes"></div>
       </div>
-      <label class="f">Logo du client / projet (rapport PDF)</label>
-      <div class="row"><img class="logo" id="plogo" style="width:56px;height:56px;${p.logoId ? '' : 'display:none'}">
-        <label class="btn grow">Choisir une image<input type="file" accept="image/*" class="hidden-input" id="plogo-in"></label></div>
+      <label class="f">Logos du rapport PDF <span class="muted small">(2 maximum, ex. Jan De Nul + Besix)</span></label>
+      <div class="logo-slots">${[['logoId', 'Logo 1'], ['logo2Id', 'Logo 2']].map(([k, l]) => `<div class="logo-slot">
+        <div class="logo-box" data-lbox="${k}">${p[k] ? '<img alt="">' : `<span class="muted small">${l}</span>`}</div>
+        <div class="row" style="gap:6px"><label class="btn grow small-btn">${p[k] ? 'Changer' : 'Ajouter'}<input type="file" accept="image/*" class="hidden-input" data-lin="${k}"></label>${p[k] ? `<button class="btn danger small-btn" data-ldel="${k}" aria-label="Retirer">${ic('x', 18)}</button>` : ''}</div></div>`).join('')}</div>
+      <p class="muted small" style="margin:6px 0 0">Utilisez les fichiers officiels (PNG ou JPG, fond blanc) fournis par votre société.</p>
     </div>
     ${isNew ? `<button class="btn primary big" id="create">Créer le projet</button>` : `
     <div class="section-head"><span>Plans</span><span class="muted small">${plans.length}</span></div>
@@ -1943,7 +2086,7 @@ async function vProject(id) {
       <div class="check-grid">${types[t].map(s => `<label class="check-item" style="--c:${esc(s.color)}"><input type="checkbox" data-comp="${s.id}" ${(p.companyIds || []).includes(s.id) ? 'checked' : ''}><span class="mono">${esc(abbr(s.name))}</span><b>${esc(s.name)}</b></label>`).join('')}</div>` : '').join('')}
     <button class="btn block" id="parch" style="margin-top:20px">${p.archived ? 'Réactiver le projet' : 'Archiver le projet'}</button>
     <p class="muted small" style="text-align:center">Enregistrement automatique</p>`}`;
-  if (p.logoId) $('#plogo').src = await db.blobURL(p.logoId);
+  for (const k of ['logoId', 'logo2Id']) if (p[k]) { const im = view.querySelector(`[data-lbox="${k}"] img`); if (im) im.src = await db.blobURL(p[k]); }
   view.querySelectorAll('[data-img]').forEach(async im => { im.src = await db.blobURL(im.dataset.img); });
   view.addEventListener('input', e => {
     const k = e.target.dataset.k;
@@ -1956,10 +2099,12 @@ async function vProject(id) {
     p.companyIds = e.target.checked ? [...new Set([...(p.companyIds || []), c])] : (p.companyIds || []).filter(x => x !== c);
     $('#ncomp').textContent = p.companyIds.length + ' sélectionnée(s)'; save.flush();
   });
-  $('#plogo-in').onchange = async e => {
-    const f = e.target.files[0]; if (!f) return;
-    p.logoId = await db.putBlob(await compressImage(f, 400, 0.9)); $('#plogo').src = await db.blobURL(p.logoId); $('#plogo').style.display = ''; save.flush();
-  };
+  view.querySelectorAll('[data-lin]').forEach(inp => inp.onchange = async e => {
+    const f = e.target.files[0]; if (!f) return; const k = inp.dataset.lin;
+    p[k] = await db.putBlob(await compressImage(f, 600, 0.92)); save.flush(); toast('Logo ajouté');
+    if (isNew) view.querySelector(`[data-lbox="${k}"]`).innerHTML = `<img alt="" src="${await db.blobURL(p[k])}">`; else render();
+  });
+  view.querySelectorAll('[data-ldel]').forEach(b => b.onclick = () => { p[b.dataset.ldel] = null; save.flush(); render(); });
   if (isNew) {
     $('#create').onclick = async () => {
       if (!p.name.trim()) return toast('Indiquez le nom du projet');
@@ -1972,7 +2117,12 @@ async function vProject(id) {
   $('#p-in').onchange = async e => { const f = e.target.files[0]; if (!f) return; try { await importPlanFile(f, p.id); render(); } catch (err) { toast('Import impossible : ' + err.message, 4000); } };
   view.addEventListener('click', async e => {
     const d = e.target.closest('[data-pdel]'); if (!d) return;
-    if (await confirmBox('Supprimer ce plan ?', 'Les audits restent, mais leurs épingles ne seront plus visibles.')) { await db.remove('plans', d.dataset.pdel); render(); }
+    if (await confirmBox('Supprimer ce plan ?', 'Les audits restent, mais leurs épingles ne seront plus visibles.')) {
+      const pl = await db.get('plans', d.dataset.pdel);
+      await db.remove('plans', d.dataset.pdel); if (pl?.blobId) db.deleteBlob(pl.blobId).catch(() => {});
+      if (await db.getMeta('lastPlan') === d.dataset.pdel) await db.setMeta('lastPlan', null);
+      render();
+    }
   });
   $('#parch').onclick = async () => {
     if (!p.archived && p.id === PROJECT?.id && (await allowedProjects()).length < 2) return toast('Créez d’abord un autre projet');
@@ -2039,7 +2189,7 @@ async function vSettings() {
     <button class="sync-pill" id="sync-now" hidden></button>
 ` : ''}
     <div class="card">
-      ${cloud.enabled ? '' : `<label class="f" style="margin-top:0">Inspecteur par défaut</label><input class="in" data-s="inspector" value="${esc(st.inspector)}">`}
+      ${cloud.enabled ? '' : `<label class="f" style="margin-top:0">Inspecteur par défaut</label><input class="in" data-s="inspector" list="hse-list" value="${esc(st.inspector)}" autocomplete="off">`}
       <label class="row check-line perm-row" style="margin-top:12px"><span class="grow"><b>Joindre les photos aux actions envoyées</b><small>« Envoyer à l’entreprise » : décochez si le client interdit de diffuser les photos du site</small></span>
         <input type="checkbox" class="switch" id="share-ph" ${st.sharePhotos === false ? '' : 'checked'}></label>
       <label class="f">Affichage</label><div class="seg" id="theme">${[['auto', 'Auto'], ['light', 'Clair'], ['dark', 'Sombre']].map(([v, l]) => `<button data-val="${v}" class="${st.theme === v ? 'on' : ''}">${l}</button>`).join('')}</div>
@@ -2108,12 +2258,14 @@ const permSummary = p => {
   return on.length === Object.keys(cloud.PERMS).length ? 'Tous les droits' : on.length ? on.map(k => L[k]).join(' · ') : 'Lecture seule';
 };
 const projSummary = (ids, projects) => !ids || !ids.length ? 'Tous les projets' : ids.map(id => projects.find(p => p.id === id)?.name || '?').join(', ');
-const inviteLink = (email, name) => `${location.origin}${location.pathname}#/join?e=${encodeURIComponent(email)}&n=${encodeURIComponent(name || '')}`;
-async function shareInvite(email, name) {
-  const link = inviteLink(email, name);
-  const text = `Bonjour${name ? ' ' + name.split(' ')[0] : ''}, voici ton accès à l’application PRT HSE : ${link}\n1. Ouvre le lien dans Safari\n2. « Créer mon compte » avec ${email}\n3. Partager → « Sur l’écran d’accueil »`;
+const inviteLink = (email, name, code) => `${location.origin}${location.pathname}#/join?e=${encodeURIComponent(email)}&n=${encodeURIComponent(name || '')}${code ? '&c=' + encodeURIComponent(code) : ''}`;
+async function shareInvite(email, name, code) {
+  // le code d'invitation protège le compte : sans lui, personne d'autre ne peut créer le compte à cette adresse
+  if (!code) code = (await cloud.inviteCode(email).catch(() => null)) || '';
+  const link = inviteLink(email, name, code);
+  const text = `Bonjour${name ? ' ' + name.split(' ')[0] : ''}, voici ton accès à l’application PRT HSE : ${link}\n1. Ouvre le lien dans Safari\n2. « Créer mon compte » avec ${email}${code ? ` (code d’invitation : ${code})` : ''}\n3. Partager → « Sur l’écran d’accueil »\nCe lien est personnel : ne le transfère pas.`;
   openSheet(`<h3>Invitation prête</h3>
-    <p class="muted">Envoyez ce lien à <b>${esc(name || email)}</b>. Il ne fonctionne qu’avec l’adresse invitée.</p>
+    <p class="muted">Envoyez ce lien à <b>${esc(name || email)}</b> uniquement : il contient son code d’invitation personnel${code ? ` (<b>${esc(code)}</b>)` : ''}.</p>
     <div class="invite-link">${esc(link)}</div>
     <div style="display:grid;gap:10px;margin-top:12px">
       ${navigator.share ? `<button class="btn primary block" data-s>${ic('share')} Envoyer (WhatsApp, mail, Teams…)</button>` : ''}
@@ -2175,10 +2327,10 @@ async function vTeam() {
     ${pending.length ? `<div class="section-head"><span>Invitations en attente</span><span class="muted small">${pending.length}</span></div>
       ${pending.map(i => `<div class="card member-card"><span class="avatar pending">${ic('clock', 18)}</span>
         <span class="grow"><b>${esc(i.name || i.email)}</b><span class="muted small ellip">${esc(i.email)}</span><span class="member-meta">${esc(permSummary(i))} · ${esc(projSummary(i.projects, projects))}</span></span>
-        <span class="col-btns"><button class="btn small-btn" data-resend="${esc(i.email)}" data-name="${esc(i.name || '')}">${ic('share', 18)}</button>
+        <span class="col-btns"><button class="btn small-btn" data-resend="${esc(i.email)}" data-name="${esc(i.name || '')}" data-code="${esc(i.code || '')}">${ic('share', 18)}</button>
         <button class="btn small-btn danger" data-del="${esc(i.email)}" aria-label="Annuler">${ic('x', 18)}</button></span></div>`).join('')}` : ''}`;
   view.addEventListener('click', async e => {
-    const r = e.target.closest('[data-resend]'); if (r) return shareInvite(r.dataset.resend, r.dataset.name);
+    const r = e.target.closest('[data-resend]'); if (r) return shareInvite(r.dataset.resend, r.dataset.name, r.dataset.code);
     const d = e.target.closest('[data-del]');
     if (d && await confirmBox('Annuler cette invitation ?', esc(d.dataset.del), 'Annuler l’invitation')) {
       try { await cloud.removeInvite(d.dataset.del); render(); } catch (err) { toast(err.message, 4000); }
@@ -2262,11 +2414,52 @@ async function vStats() {
   const group = (l, key) => { const m = new Map(); l.forEach(x => { const k = key(x); m.set(k, [...(m.get(k) || []), x]); }); return [...m.entries()]; };
   // un audit fait à deux compte pour chacun des deux HSE
   const people = i => (cloud.enabled && names[i.owner]?.name) ? [names[i.owner].name] : (i.inspectors || 'Non renseigné').split(/\s*(?:,|;|\/|&|\bet\b)\s*/i).map(x => x.trim()).filter(Boolean);
-  const byHseMap = new Map(); insps.forEach(i => [...new Set(people(i))].forEach(n => byHseMap.set(n, [...(byHseMap.get(n) || []), i])));
-  const byHse = [...byHseMap.entries()].map(([n, l]) => ({ n, l, avg: avg(l) })).sort((a, b) => b.l.length - a.l.length);
+  const byHse = hseNames(insps, people).map(x => {
+    const ids = new Set(x.l.map(i => i.id)), mineActs = acts.filter(a => ids.has(a.inspectionId) && a.status !== 'Closed');
+    return { ...x, avg: avg(x.l), open: mineActs.length, late: mineActs.filter(isLate).length, last: x.l.reduce((m, i) => i.date > m ? i.date : m, '') };
+  }).sort((a, b) => b.l.length - a.l.length || a.n.localeCompare(b.n));
   const bySub = [...new Set(insps.flatMap(subIdsOf))].map(id => [id, insps.filter(i => hasSub(i, id))]).map(([id, l]) => ({ s: subs[id], l, avg: avg(l), open: acts.filter(a => a.subId === id && a.status !== 'Closed').length })).sort((a, b) => (b.avg ?? -1) - (a.avg ?? -1));
   const open = acts.filter(a => a.status !== 'Closed'), late = acts.filter(isLate);
-  const maxH = Math.max(1, ...byHse.map(x => x.l.length));
+  // infractions = critères notés 0, 1 ou 2 (comme les « constats prioritaires » du rapport), audits d'entreprise uniquement
+  const compAudits = insps.filter(i => subIdsOf(i).length);
+  const infr = (list) => {
+    const m = new Map();
+    for (const i of list) for (const [ref, sc] of Object.entries(i.scores || {})) {
+      if (!criterionOfRef(ref) || sc?.v === null || sc?.v === undefined || sc.v === NA) continue;
+      const e = m.get(ref) || { ref, n: 0, rated: 0, subs: new Map() };
+      e.rated++;
+      if (typeof sc.v === 'number' && sc.v <= 2) { e.n++; subIdsOf(i).forEach(id => e.subs.set(id, (e.subs.get(id) || 0) + 1)); }
+      m.set(ref, e);
+    }
+    return [...m.values()].filter(e => e.n).sort((a, b) => b.n - a.n || b.n / b.rated - a.n / a.rated || a.ref.localeCompare(b.ref, undefined, { numeric: true }));
+  };
+  const topAll = infr(compAudits);
+  const infSubs = [...new Set(compAudits.flatMap(subIdsOf))].map(id => ({ id, s: subs[id], l: compAudits.filter(i => hasSub(i, id)) }))
+    .map(x => ({ ...x, top: infr(x.l) })).filter(x => x.s).sort((a, b) => b.top.reduce((t, e) => t + e.n, 0) - a.top.reduce((t, e) => t + e.n, 0));
+  if (statsF.infSub && !infSubs.some(x => x.id === statsF.infSub)) statsF.infSub = '';
+  const critName = ref => CRIT_FR[ref] || criterionOfRef(ref)?.name || ref;
+  const themeName = ref => { const t = themeOfRef(ref); return t ? (THEME_FR[t.ref] || t.name) : ''; };
+  // ---- tableau de bord infractions : 3 chiffres clés + top 10 en barres (noms entiers) ----
+  const infCur = () => statsF.infSub ? (infSubs.find(x => x.id === statsF.infSub)?.top || []) : topAll;
+  const isLSR = ref => /LSR/.test(themeOfRef(ref)?.name || '');
+  const prevAudits = statsF.period ? allInsps.filter(i => scope(i) && subIdsOf(i).length && i.date >= todayISO(-2 * statsF.period) && i.date < since) : null;
+  const sum = l => l.reduce((t, e) => t + e.n, 0);
+  const subRank = infSubs.map(x => ({ id: x.id, t: sum(x.top) })).sort((a, b) => b.t - a.t);
+  const infDash = () => {
+    const list = infCur(), tot = sum(list), lsr = sum(list.filter(e => isLSR(e.ref))), pctL = tot ? Math.round(lsr / tot * 100) : 0;
+    const prev = prevAudits ? sum(infr(prevAudits.filter(i => !statsF.infSub || hasSub(i, statsF.infSub)))) : null, d = prev === null ? null : tot - prev;
+    const r = statsF.infSub ? subRank.findIndex(x => x.id === statsF.infSub) + 1 : 0, first = subRank[0] && subs[subRank[0].id];
+    const top = list.slice(0, 10), max = Math.max(1, ...top.map(e => e.n));
+    return `<div class="idash-kpi">
+        <div class="ik"><b class="red">${tot}</b><span>infractions</span>${d === null ? '' : `<small class="${d > 0 ? 'bad' : d < 0 ? 'good' : ''}">${d > 0 ? '▲ +' + d : d < 0 ? '▼ ' + d : '='} vs période préc.</small>`}</div>
+        <div class="ik ring-k"><span class="ring" style="--p:${pctL}"><b>${pctL}%</b></span><span>règles vitales (LSR)<small>${lsr} sur ${tot}</small></span></div>
+        <div class="ik">${statsF.infSub ? `<b>${r}<sup>${r === 1 ? 're' : 'e'}</sup></b><span>sur ${subRank.length} entreprises</span><small>(1re = la plus concernée)</small>`
+          : `<b class="nm">${esc(first?.name || '—')}</b><span>la plus concernée</span><small>${subRank[0]?.t || 0} infractions</small>`}</div>
+      </div>
+      <div class="ihead">Top 10 des infractions${statsF.infSub ? ' · ' + esc(subs[statsF.infSub]?.name || '') : ''}</div>
+      ${top.map((e, k) => `<div class="ibar ${k < 3 ? 'hot' : ''}"><span class="ibar-l">${esc(critName(e.ref))}${isLSR(e.ref) ? ' <span class="lsr">LSR</span>' : ''}</span>
+        <span class="ibar-r"><span class="ibar-b"><i style="width:${Math.max(3, e.n / max * 100)}%"></i></span><b>${e.n}</b></span></div>`).join('') || '<div class="empty">Aucune infraction sur la période 👍</div>'}`;
+  };
   // activité : audits par semaine (8 dernières)
   const weeks = [...Array(8)].map((_, k) => { const end = todayISO(-7 * k), start = todayISO(-7 * k - 6); return { start, end, n: allInsps.filter(i => scope(i) && i.date >= start && i.date <= end).length }; }).reverse();
   const maxW = Math.max(1, ...weeks.map(w => w.n));
@@ -2283,12 +2476,12 @@ async function vStats() {
       <div class="${late.length ? 'late' : ''}"><b>${late.length}</b><span>En retard</span></div>
     </div>
 
-    <div class="section-head"><span>Audits par HSE</span><span class="muted small">${byHse.length} personne${byHse.length > 1 ? 's' : ''}</span></div>
-    <div class="card stat-list">${byHse.map(x => `
-      <div class="stat-row"><span class="avatar sm">${esc(x.n.split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase())}</span>
-        <span class="grow"><b>${esc(x.n)}</b><span class="hbar"><i style="width:${x.l.length / maxH * 100}%"></i></span></span>
-        <span class="stat-num"><b>${x.l.length}</b><small>audit${x.l.length > 1 ? 's' : ''}</small></span>
-        ${x.avg === null ? '<span class="badge none">—</span>' : badge(x.avg)}</div>`).join('') || '<div class="empty">Aucun audit sur la période</div>'}</div>
+    <div class="section-head"><span>Audits par HSE</span><span class="muted small">${byHse.length} personne${byHse.length > 1 ? 's' : ''} · touchez un nom pour ses audits</span></div>
+    <div class="card stat-list hse-list">${byHse.map((x, k) => `
+      <a class="stat-row hse-row ${k >= 5 ? 'more' : ''}" href="#/audits?hse=${encodeURIComponent(x.k)}"><span class="avatar sm">${esc(x.n.split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase())}</span>
+        <span class="grow"><b>${esc(x.n)}</b><small class="muted">${x.l.length} audit${x.l.length > 1 ? 's' : ''} · dernier le ${dateFR(x.last).slice(0, 5)}${x.open ? ` · <span class="${x.late ? 'late' : ''}">${x.open} action${x.open > 1 ? 's' : ''} ouverte${x.open > 1 ? 's' : ''}${x.late ? ` (${x.late} en retard)` : ''}</span>` : ''}</small></span>
+        ${x.avg === null ? '<span class="badge none">—</span>' : badge(x.avg)}</a>`).join('') || '<div class="empty">Aucun audit sur la période</div>'}
+      ${byHse.length > 5 ? `<button type="button" class="link-btn hse-more" id="hse-more">Voir les ${byHse.length - 5} autres</button>` : ''}</div>
 
     <div class="section-head"><span>Activité</span><span class="muted small">audits par semaine</span></div>
     <div class="card week-chart">${weeks.map(w => `<div class="wcol"><span class="wn">${w.n || ''}</span><i style="height:${w.n / maxW * 100}%"></i><small>${w.start.slice(8, 10)}/${w.start.slice(5, 7)}</small></div>`).join('')}</div>
@@ -2305,20 +2498,36 @@ async function vStats() {
       <div class="stack-legend">${STATUSES.map(k => `<span><i class="kdot st-${k.replace(' ', '')}"></i>${{ Open: 'Ouvertes', 'In progress': 'En cours', Closed: 'Clôturées' }[k]} <b>${st[k]}</b></span>`).join('')}</div>
       <div class="stack-legend">${PRIOS.map(p => `<span class="prio-txt p-${p}">${PRIO_FR[p]} <b>${open.filter(a => a.priority === p).length}</b></span>`).join('')}<span class="muted small">(ouvertes)</span></div>
     </div>
+
+
+    <div class="section-head"><span>Infractions</span><span class="muted small">critères notés 0 à 2</span></div>
+    <div class="card idash">
+      <select class="in f-sel ${statsF.infSub ? 'set' : ''}" id="inf-sub"><option value="">Toutes les entreprises</option>${infSubs.map(x => `<option value="${x.id}" ${x.id === statsF.infSub ? 'selected' : ''}>${esc(x.s.name)}</option>`).join('')}</select>
+      <div id="inf-rows">${infDash()}</div>
+    </div>
+
     <button class="btn block primary" id="st-x" style="margin-top:12px">${ic('download')} Exporter ces statistiques (Excel)</button>`;
   view.addEventListener('click', e => {
     const p = e.target.closest('[data-per]'); if (p) { statsF.period = +p.dataset.per; render(); return; }
-    const sc = e.target.closest('[data-scope]'); if (sc) { statsF.scope = sc.dataset.scope; render(); }
+    const sc = e.target.closest('[data-scope]'); if (sc) { statsF.scope = sc.dataset.scope; render(); return; }
+    if (e.target.closest('#hse-more')) { view.querySelector('.hse-list').classList.add('all'); e.target.closest('#hse-more').remove(); return; }
   });
+  $('#inf-sub')?.addEventListener('change', e => { statsF.infSub = e.target.value; e.target.classList.toggle('set', !!statsF.infSub); $('#inf-rows').innerHTML = infDash(); });
   $('#st-x').onclick = () => {
     const XLSX = window.XLSX, wb = XLSX.utils.book_new();
     const period = statsF.period ? `${statsF.period} derniers jours` : 'toute la période';
     const head = [['PRT HSE — Pilotage'], [`Périmètre : ${scopeName} · ${period} · édité le ${dateFR(todayISO())}`], []];
-    const sh1 = XLSX.utils.aoa_to_sheet([...head, ['HSE', 'Audits', 'Score moyen'], ...byHse.map(x => [x.n, x.l.length, x.avg === null ? '' : Math.round(x.avg * 1000) / 10 + ' %'])]);
+    const sh1 = XLSX.utils.aoa_to_sheet([...head, ['HSE', 'Audits', 'Score moyen', 'Actions ouvertes', 'Dernier audit'], ...byHse.map(x => [x.n, x.l.length, x.avg === null ? '' : Math.round(x.avg * 1000) / 10 + ' %', x.open, dateFR(x.last)])]);
     const sh2 = XLSX.utils.aoa_to_sheet([...head, ['Entreprise', 'Type', 'Audits', 'Score moyen', 'Actions ouvertes'], ...bySub.map(x => [x.s?.name, typeOf(x.s).label, x.l.length, x.avg === null ? '' : Math.round(x.avg * 1000) / 10 + ' %', x.open])]);
     const sh3 = XLSX.utils.aoa_to_sheet([...head, ['Date', 'Projet', 'Entreprise', 'HSE', 'Référence', 'Score'], ...insps.sort((a, b) => a.date.localeCompare(b.date)).map(i => [dateFR(i.date), projects.find(p => p.id === pid(i))?.name || '', auditLabel(i, subs), who(i), i.ref, pctOf(i) === null ? '' : Math.round(pctOf(i) * 1000) / 10 + ' %'])]);
     [sh1, sh2, sh3].forEach(sh => { sh['!cols'] = [{ wch: 28 }, { wch: 18 }, { wch: 22 }, { wch: 18 }, { wch: 34 }, { wch: 10 }]; });
+    const infLine = (e, k) => [k + 1, e.ref, critName(e.ref), themeName(e.ref), e.n, e.rated, Math.round(e.n / e.rated * 1000) / 10 + ' %'];
+    const sh4 = XLSX.utils.aoa_to_sheet([...head, ['Rang', 'Réf.', 'Critère', 'Thème', 'Infractions (note 0–2)', 'Fois noté', 'Taux', 'Entreprises concernées'], ...topAll.slice(0, 10).map((e, k) => [...infLine(e, k), [...e.subs.keys()].map(id => subs[id]?.name).join(', ')])]);
+    const sh5 = XLSX.utils.aoa_to_sheet([...head, ['Entreprise', 'Rang', 'Réf.', 'Critère', 'Thème', 'Infractions (note 0–2)', 'Fois noté', 'Taux', 'Objectif (à remplir)'], ...infSubs.flatMap(x => x.top.slice(0, 10).map((e, k) => [x.s.name, ...infLine(e, k), '']))]);
+    sh4['!cols'] = [{ wch: 6 }, { wch: 7 }, { wch: 40 }, { wch: 30 }, { wch: 12 }, { wch: 10 }, { wch: 9 }, { wch: 40 }];
+    sh5['!cols'] = [{ wch: 22 }, { wch: 6 }, { wch: 7 }, { wch: 40 }, { wch: 30 }, { wch: 12 }, { wch: 10 }, { wch: 9 }, { wch: 20 }];
     XLSX.utils.book_append_sheet(wb, sh1, 'Par HSE'); XLSX.utils.book_append_sheet(wb, sh2, 'Par entreprise'); XLSX.utils.book_append_sheet(wb, sh3, 'Audits');
+    XLSX.utils.book_append_sheet(wb, sh4, 'Top 10 infractions'); XLSX.utils.book_append_sheet(wb, sh5, 'Infractions par entreprise');
     const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
     readySheet(new File([out], `PRT-pilotage-${todayISO()}.xlsx`, { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
   };
@@ -2367,7 +2576,7 @@ async function vReport(id) {
     <div class="card">
       <label class="f" style="margin-top:0">Projet / chantier</label><input class="in" data-i="site" value="${esc(insp.site || '')}">
       <label class="f">Zone</label><input class="in" data-i="zone" autocomplete="off" value="${esc(insp.zone || '')}">
-      <div class="btns" style="margin-bottom:0"><div><label class="f">Inspecteur(s)</label><input class="in" data-i="inspectors" value="${esc(insp.inspectors || '')}"></div>
+      <div class="btns" style="margin-bottom:0"><div><label class="f">Inspecteur(s)</label><input class="in" data-i="inspectors" list="hse-list" value="${esc(insp.inspectors || '')}" autocomplete="off"></div>
       <div><label class="f">Date</label><input class="in" type="date" data-i="date" value="${esc(insp.date)}"></div></div>
     </div>
     <div class="section-head"><span>Contenu du rapport</span></div>
@@ -2435,6 +2644,14 @@ const routes = [
 ];
 
 let renderSeq = 0;
+/** Suggestions du champ « Inspecteur » : les noms déjà utilisés, écrits proprement (évite « axel » / « Axel ») */
+async function fillHseList() {
+  let dl = document.getElementById('hse-list');
+  if (!dl) { dl = document.createElement('datalist'); dl.id = 'hse-list'; document.body.appendChild(dl); }
+  const names = hseNames(await db.all('inspections'), i => hseSplit(i.inspectors)).map(x => x.n);
+  if (cloud.enabled && cloud.myName()) names.unshift(cloud.myName());
+  dl.innerHTML = [...new Set(names)].sort((a, b) => a.localeCompare(b)).map(n => `<option value="${esc(n)}">`).join('');
+}
 /** Menu latéral (écran large) : projet actif en bas, cliquable pour en changer */
 function drawSideFoot() {
   const f = document.getElementById('side-foot'); if (!f) return;
@@ -2461,6 +2678,7 @@ async function render() {
     try {
       const args = m.slice(1);
       await (args.length ? fn(...args, q) : fn(q));
+      if (seq === renderSeq && fresh.querySelector('[list="hse-list"]')) fillHseList();
     } catch (err) { console.error(err); if (seq === renderSeq) fresh.innerHTML = `<div class="empty">Erreur : ${esc(err.message)}</div>`; }
     window.scrollTo(0, 0);
     return;
@@ -2487,7 +2705,7 @@ async function migrateSeedIds() {
     await db.putRaw('subs', { ...s, id: remap[s.id] }); await db.purge('subs', s.id);
   }
   for (const p of await db.all('plans', { includeDeleted: true })) {
-    if (p.code !== SEED_PLAN.code || p.id === SEED_PLAN_ID) continue;
+    if (!SEED_PLAN || p.code !== SEED_PLAN.code || p.id === SEED_PLAN_ID) continue;
     remap[p.id] = SEED_PLAN_ID;
     await db.putRaw('plans', { ...p, id: SEED_PLAN_ID }); await db.purge('plans', p.id);
     if (await db.getMeta('lastPlan') === p.id) await db.setMeta('lastPlan', SEED_PLAN_ID);
@@ -2523,7 +2741,7 @@ async function seed() {
     if (!existing.some(e => (e.name || '').toLowerCase() === s.name.toLowerCase())) await db.put('subs', { ...s, id: seedId(s.name), contact: '', phone: '', archived: false });
   }
   const plans = await db.all('plans');
-  if (!plans.some(p => p.code === SEED_PLAN.code)) {
+  if (SEED_PLAN && !plans.some(p => p.code === SEED_PLAN.code)) {
     // le plan de départ est facultatif : s'il n'est plus publié (confidentialité), on l'importe depuis Réglages → Projets et plans
     const res = await fetch(SEED_PLAN.file).catch(() => null);
     const blob = res?.ok ? await res.blob() : null;
@@ -2546,12 +2764,33 @@ new MutationObserver(ms => ms.forEach(m => m.addedNodes.forEach(n => {
   navigator.storage?.persist?.().catch(() => {}); // demande au navigateur de ne pas effacer les audits
   applyTheme((await getSettings()).theme);
   matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', async () => applyTheme((await getSettings()).theme));
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(e => console.warn('SW', e));
-  navigator.storage?.persist?.().catch(() => {});
+  if ('serviceWorker' in navigator) watchUpdates();
+  if (!(await db.getMeta('seeded-v3')) || !(await db.getMeta('ids-v3'))) await loadSeed(); // données de départ privées : premier démarrage (ou très ancienne installation)
   try { await cloud.init(); } catch (e) { console.error('cloud', e); }
   if (cloud.enabled && !cloud.session) return showLogin();
   await startApp();
 })();
+
+/** Mise à jour : la nouvelle version se télécharge en arrière-plan, puis un bandeau propose de l'activer en un toucher */
+function watchUpdates() {
+  let asked = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (asked) location.reload(); });
+  const offer = w => {
+    if (!w || !navigator.serviceWorker.controller || document.querySelector('.upd-bar')) return;
+    const bar = document.createElement('div');
+    bar.className = 'upd-bar';
+    bar.innerHTML = `<span>${ic('download', 20)}<b>Nouvelle version disponible</b></span><button class="btn primary small-btn">Mettre à jour</button>`;
+    bar.querySelector('button').onclick = () => { asked = true; [...pendingSaves].forEach(d => d.flush()); bar.querySelector('button').textContent = 'Mise à jour…'; w.postMessage('skipWaiting'); };
+    document.body.appendChild(bar);
+  };
+  navigator.serviceWorker.register('sw.js').then(reg => {
+    offer(reg.waiting);
+    reg.addEventListener('updatefound', () => { const w = reg.installing; w?.addEventListener('statechange', () => { if (w.state === 'installed') offer(w); }); });
+    // vérifie s'il y a du neuf quand on revient dans l'app (au plus une fois par minute)
+    let last = Date.now();
+    document.addEventListener('visibilitychange', () => { if (!document.hidden && Date.now() - last > 60000) { last = Date.now(); reg.update().catch(() => {}); } });
+  }).catch(e => console.warn('SW', e));
+}
 
 async function startApp() {
   document.body.classList.remove('login-mode');
@@ -2576,10 +2815,11 @@ function showLogin() {
       <div class="login">
         <div class="login-logo"><img src="icons/icon-192.png" alt=""></div>
         <h1>PRT HSE</h1>
-        <p class="muted">SAM 2A · Site HSE Performance Rating</p>
+        <p class="muted">Inspections HSE · Site HSE Performance Rating</p>
         <div class="tabs3 two"><button type="button" data-m="in" class="${mode === 'in' ? 'on' : ''}">Se connecter</button><button type="button" data-m="up" class="${mode === 'up' ? 'on' : ''}">Créer mon compte</button></div>
         <form id="lf" autocomplete="on">
           ${mode === 'up' ? '<label class="f">Nom et prénom</label><input class="in" id="l-name" autocomplete="name" required>' : ''}
+          ${mode === 'up' ? '<label class="f">Code d’invitation <span class="muted small">(dans le message reçu)</span></label><input class="in" id="l-code" autocomplete="off" autocapitalize="characters" spellcheck="false">' : ''}
           <label class="f">Email professionnel</label><input class="in" id="l-mail" type="email" inputmode="email" autocomplete="username" required>
           <label class="f">Mot de passe</label><input class="in" id="l-pass" type="password" autocomplete="${mode === 'up' ? 'new-password' : 'current-password'}" minlength="8" required>
           <p class="login-err" id="l-err"></p>
@@ -2592,7 +2832,7 @@ function showLogin() {
       e.preventDefault();
       const btn = $('#l-go'); btn.disabled = true; btn.textContent = 'Connexion…'; $('#l-err').textContent = '';
       try {
-        if (mode === 'up') await cloud.signUp($('#l-mail').value, $('#l-pass').value, $('#l-name').value);
+        if (mode === 'up') await cloud.signUp($('#l-mail').value, $('#l-pass').value, $('#l-name').value, $('#l-code').value);
         else await cloud.signIn($('#l-mail').value, $('#l-pass').value);
         history.replaceState(null, '', '#/'); await startApp();
       } catch (err) { $('#l-err').textContent = err.message; btn.disabled = false; btn.textContent = label(); }
@@ -2600,7 +2840,7 @@ function showLogin() {
   };
   setTop({ title: '' });
   draw();
-  if (join) { $('#l-mail').value = join.get('e') || ''; if ($('#l-name')) $('#l-name').value = join.get('n') || ''; $('#l-pass').focus(); }
+  if (join) { $('#l-mail').value = join.get('e') || ''; if ($('#l-name')) $('#l-name').value = join.get('n') || ''; if ($('#l-code')) $('#l-code').value = join.get('c') || ''; $('#l-pass').focus(); }
 }
 
 // ---------- indicateur de synchronisation ----------
