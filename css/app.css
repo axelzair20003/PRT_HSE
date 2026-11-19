@@ -908,3 +908,26 @@ a.vg-head:active { background: #E8EEF8; }
   .notice-ic { width: 32px; height: 32px; }
 }
 [hidden] { display: none !important; }
+/* ---- v3.12 : forme libre et modification d'une zone ---- */
+.pv-handles { position: absolute; inset: 0; pointer-events: none; }
+.pv-h { position: absolute; width: 22px; height: 22px; margin: -11px 0 0 -11px; border-radius: 50%; background: #fff; border: 3px solid #0B2D5B; box-shadow: 0 1px 4px rgba(0,0,0,.45); transform: scale(var(--inv, 1)); pointer-events: auto; touch-action: none; }
+.pv-h::after { content: ''; position: absolute; inset: -12px; border-radius: 50%; } /* zone de toucher plus large */
+.pv-h.mid { width: 16px; height: 16px; margin: -8px 0 0 -8px; background: #F5C400; border-width: 2px; opacity: .95; }
+.pv-h.first { background: #F5C400; width: 26px; height: 26px; margin: -13px 0 0 -13px; }
+.pv-area.pv-open { fill: none; stroke-dasharray: 8 5; }
+.pv-poly, .pv-editing { cursor: crosshair; }
+.ztools { display: flex; flex-wrap: wrap; gap: 8px; }
+.ztools .btn { flex: 1 1 auto; margin: 0; min-height: 46px; font-size: 15px; }
+.ztools .zhint { flex-basis: 100%; font-size: 14px; color: var(--muted); margin: 0; }
+
+/* ---- v3.14 : apparence de l'app ---- */
+.brand-card { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start; }
+.brand-logo { width: 84px; height: 84px; flex: none; border-style: solid; }
+.brand-logo img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 10px; }
+/* Pilotage : sur le côté (PC) ; sur téléphone, accessible depuis Réglages */
+@media (max-width: 1023px) { #tabbar a.pc-only { display: none; } }
+.pick-search { position: relative; margin: 0 0 8px; }
+.pick-search .ic { position: absolute; left: 13px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
+.pick-search .in { padding-left: 40px; margin: 0; }
+#top-logo { width: 34px; height: 34px; border-radius: 9px; object-fit: cover; flex: none; margin-right: 10px; background: #fff; }
+@media (min-width: 1024px) { #top-logo { display: none; } }

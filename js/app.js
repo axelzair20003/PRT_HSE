@@ -10,7 +10,7 @@ import { SEED_SUBS, SEED_LOCATIONS, SEED_PLAN, SEED_SITE, SEED_PROJECT, loadSeed
 import { CRIT_FR, THEME_FR, TXT as RTXT } from './report-fr.js';
 import { REPORT_DEFAULTS, REPORT_TITLES, buildXLSX, buildPDF, shareFile, download, canShareFile, actionRef } from './export.js';
 
-export const APP_VERSION = '3.12.0';
+export const APP_VERSION = '3.14.0';
 
 // ---------- utilitaires ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -75,6 +75,8 @@ function setTop({ title, sub = '', back = null, actions = [], onTitle = null }) 
   t.onclick = onTitle;
   const b = $('#back');
   b.hidden = !back;
+  // logo de l'app à gauche du titre sur les écrans principaux (sans bouton retour)
+  const tl = $('#top-logo'); if (tl) { tl.hidden = !!back; if (!back && tl.getAttribute('src') !== BRAND.logo) tl.src = BRAND.logo; }
   b.onclick = () => { if (back === true) history.back(); else location.hash = back; };
   const ta = $('#top-actions');
   ta.innerHTML = '';
@@ -164,6 +166,45 @@ const pid = r => r?.projectId || DEFAULT_PROJECT;
 const inProject = r => !PROJECT || pid(r) === PROJECT.id;
 async function allowedProjects() {
   return (await db.all('projects')).filter(p => !p.archived && cloud.canProject(p.id)).sort((a, b) => a.name.localeCompare(b.name));
+}
+/** Barre de recherche automatique au-dessus de toute liste d'entreprises à choisir (dès 6 entreprises) */
+function addPickSearch(g) {
+  g.dataset.srch = '1';
+  const items = () => g.querySelectorAll('.pick, .check-item');
+  if (items().length < 6) return;
+  const w = document.createElement('div');
+  w.className = 'pick-search';
+  w.innerHTML = `${ic('search', 18)}<input class="in" type="search" placeholder="Rechercher une entreprise…" autocomplete="off" enterkeyhint="search">`;
+  g.before(w);
+  const inp = w.querySelector('input');
+  inp.addEventListener('input', () => {
+    const q = hseKey(inp.value);
+    // les entreprises déjà choisies restent visibles
+    items().forEach(b => { b.hidden = !!q && !hseKey(b.textContent).includes(q) && !b.classList.contains('on') && !b.querySelector('input:checked'); });
+  });
+}
+new MutationObserver(() => document.querySelectorAll('.pick-grid:not([data-srch]), .check-grid:not([data-srch])').forEach(addPickSearch))
+  .observe(document.body, { childList: true, subtree: true });
+
+/** Nom et logo de l'app (réglables par l'administrateur dans Réglages → Apparence) */
+const BRAND = { name: 'Audit HSE', logo: 'icons/icon-192.png' };
+async function applyBrand() {
+  const cache = await db.getMeta('brand', null);
+  const name = (PROJECT?.appName || cache?.name || '').trim() || 'Audit HSE';
+  const logoId = PROJECT ? PROJECT.appLogoId : cache?.logoId;
+  let logo = 'icons/icon-192.png';
+  if (logoId && logoId === BRAND.logoId) logo = BRAND.logo; // déjà lu
+  else if (logoId) { const b = await db.getBlob(logoId).catch(() => null); if (b) logo = await new Promise(r => { const f = new FileReader(); f.onload = () => r(f.result); f.readAsDataURL(b); }); }
+  if (name === BRAND.name && (logoId || null) === (BRAND.logoId || null) && BRAND.applied) return;
+  BRAND.name = name; BRAND.logo = logo; BRAND.logoId = logoId || null; BRAND.applied = true;
+  if (PROJECT && (cache?.name !== name || cache?.logoId !== (logoId || null))) await db.setMeta('brand', { name, logoId: logoId || null });
+  document.title = name;
+  document.querySelector('meta[name="apple-mobile-web-app-title"]')?.setAttribute('content', name);
+  // icône proposée lors de « Sur l'écran d'accueil » (les icônes déjà installées ne changent pas)
+  document.querySelector('link[rel="apple-touch-icon"]')?.setAttribute('href', logoId ? logo : 'icons/apple-touch-icon.png');
+  const bi = document.getElementById('brand-img'), bn = document.getElementById('brand-name');
+  if (bi) bi.src = logo; if (bn) bn.textContent = name;
+  const tl = document.getElementById('top-logo'); if (tl) tl.src = logo;
 }
 async function loadProject() {
   const list = await allowedProjects();
@@ -417,7 +458,7 @@ async function vHome() {
     const plan = (await maps()).planList[0];
     const hero = view.querySelector('.home-hero');
     if (plan?.blobId && hero) hero.style.setProperty('--hero-img', `url("${await db.blobURL(plan.blobId)}")`);
-    if (PROJECT?.logoId) { const u = await db.blobURL(PROJECT.logoId); if (u) $('#hero-logo').src = u; }
+    $('#hero-logo').src = BRAND.logo;
   })();
   bindSubGrid();
   bindNotices();
@@ -571,30 +612,44 @@ async function vStart(subId) {
  */
 function zoneKit({ plan, state, nameInput, toolsEl, onChange, color = () => '#F5C400' }) {
   let pv = null;
+  // mode : '' (normal) · 'choose' (rectangle ou forme libre ?) · 'rect' · 'poly' · 'edit'
+  let mode = '', nPts = 0, dead = false;
   const zones = () => (plan?.zones || []).filter(z => z.pts?.length > 2);
-  const areas = () => [
-    ...zones().filter(z => z.id !== state.area?.zoneId).map(z => ({ id: z.id, pts: z.pts, kind: 'zone', label: z.name })),
-    ...(state.area?.pts ? [{ id: 'sel', pts: state.area.pts, kind: 'sel', label: state.area.name || state.zone || 'Zone' }] : []),
-  ];
+  // affichage : pendant le tracé ou la modification, rien d'autre ; une zone choisie = elle seule ; sinon les zones du plan, discrètes
+  const areas = () => mode && mode !== 'choose' ? []
+    : state.area?.pts ? [{ id: 'sel', pts: state.area.pts, kind: 'sel', label: state.area.name || state.zone || 'Zone' }]
+    : zones().map(z => ({ id: z.id, pts: z.pts, kind: 'zone', label: z.name }));
   const draw = () => { pv?.setAreas(areas()); drawTools(); };
   const select = (z, focus = false) => {
     state.area = { zoneId: z.id, name: z.name, pts: z.pts }; state.zone = z.name; state.pin = centroid(z.pts);
     if (nameInput) nameInput.value = z.name;
     draw(); onChange?.('area'); if (focus) pv?.focusArea(z.pts); navigator.vibrate?.(15);
   };
+  const B = (zt, icon, label, cls = '') => `<button type="button" class="btn ${cls}" data-zt="${zt}">${ic(icon, 18)} ${label}</button>`;
   const drawTools = () => {
     if (!toolsEl) return;
-    toolsEl.innerHTML = `<button type="button" class="btn ${drawing ? 'on' : ''}" data-zt="draw">${ic('edit', 18)} ${drawing ? 'Tracez sur le plan…' : 'Tracer une zone'}</button>
-      ${state.area || state.pin ? `<button type="button" class="btn" data-zt="clear">${ic('x', 18)} Effacer</button>` : ''}`;
+    toolsEl.classList.add('ztools');
+    toolsEl.innerHTML =
+      mode === 'choose' ? `${B('rect', 'fit', 'Rectangle')}${B('poly', 'edit', 'Forme libre')}${B('cancel', 'x', 'Annuler')}`
+      : mode === 'rect' ? `<p class="zhint">Glissez le doigt sur le plan pour tracer le rectangle.</p>${B('cancel', 'x', 'Annuler')}`
+      : mode === 'poly' ? `<p class="zhint">Touchez les coins de la zone un par un (${nPts} posé${nPts > 1 ? 's' : ''}). Touchez le 1er coin ou « Terminer » pour fermer.</p>
+          ${B('undo', 'back', 'Retour', nPts ? '' : 'disabled')}${B('finish', 'check', 'Terminer', nPts >= 3 ? 'primary' : 'disabled')}${B('cancel', 'x', 'Annuler')}`
+      : mode === 'edit' ? `<p class="zhint">Glissez un coin pour le déplacer, un point jaune pour ajouter un coin, ou l’intérieur pour déplacer toute la zone.</p>${B('done', 'check', 'Terminer', 'primary')}`
+      : `${B('draw', 'edit', state.area ? 'Nouvelle zone' : 'Tracer une zone')}${state.area ? B('edit', 'fit', 'Modifier la forme') : ''}${state.area || state.pin ? B('clear', 'x', 'Effacer') : ''}`;
+    toolsEl.querySelectorAll('.btn.disabled').forEach(b => { b.disabled = true; });
   };
-  let drawing = false, dead = false;
-  const stopDraw = () => { drawing = false; pv?.setDrawMode(false); drawTools(); };
+  const setMode = m => {
+    mode = m; nPts = 0;
+    pv?.setDrawMode(m === 'rect' || m === 'poly', drawn, m === 'poly' ? 'poly' : 'rect', n => { nPts = n; drawTools(); });
+    if (m !== 'edit') pv?.setEditArea(null);
+    draw();
+  };
   const drawn = pts => {
-    stopDraw();
+    setMode('');
     const admin = cloud.isAdmin();
     openSheet(`<h3>Nouvelle zone</h3>
       <label class="f" style="margin-top:0">Nom de la zone</label><input class="in" id="zn" value="${esc(nameInput?.value || state.zone || '')}" placeholder="ex. DCH2 nord, UTI 12…" autocomplete="off">
-      ${admin && plan ? `<label class="row check-line" style="margin-top:12px"><input type="checkbox" id="zsave" checked><span>Ajouter aux zones du plan (réutilisable par toute l’équipe)</span></label>` : ''}
+      ${admin && plan ? `<label class="row check-line" style="margin-top:12px"><input type="checkbox" id="zsave"><span>Garder cette zone sur le plan pour les prochains audits</span></label>` : ''}
       <div class="btns" style="margin-top:14px"><button class="btn" data-close>Annuler</button><button class="btn primary" id="zok">Valider</button></div>`,
     (el, close) => {
       setTimeout(() => el.querySelector('#zn').focus(), 50);
@@ -603,7 +658,7 @@ function zoneKit({ plan, state, nameInput, toolsEl, onChange, color = () => '#F5
         let zoneId = null;
         if (admin && plan && el.querySelector('#zsave')?.checked && name) {
           zoneId = db.uid(); plan.zones = [...(plan.zones || []), { id: zoneId, name, pts }];
-          await db.put('plans', plan); toast('Zone ajoutée au plan');
+          await db.put('plans', plan); toast('Zone gardée sur le plan');
         }
         state.area = { zoneId, name, pts }; state.zone = name; state.pin = centroid(pts);
         if (nameInput) nameInput.value = name;
@@ -612,8 +667,22 @@ function zoneKit({ plan, state, nameInput, toolsEl, onChange, color = () => '#F5
     });
   };
   toolsEl?.addEventListener('click', e => {
-    const t = !dead && e.target.closest('[data-zt]')?.dataset.zt; if (!t) return;
-    if (t === 'draw') { if (drawing) return stopDraw(); drawing = true; pv?.setDrawMode(true, drawn); drawTools(); toast('Glissez le doigt sur le plan pour tracer la zone', 2500); }
+    const t = !dead && e.target.closest('[data-zt]:not([disabled])')?.dataset.zt; if (!t) return;
+    if (t === 'draw') return setMode('choose');
+    if (t === 'rect') { setMode('rect'); return toast('Glissez le doigt sur le plan', 2000); }
+    if (t === 'poly') { setMode('poly'); return toast('Touchez les coins de la zone', 2000); }
+    if (t === 'undo') return pv?.undoPoly();
+    if (t === 'finish') return pv?.finishPoly();
+    if (t === 'cancel') return setMode('');
+    if (t === 'edit' && state.area?.pts) {
+      setMode('edit');
+      pv?.setEditArea(state.area.pts, pts => {
+        // une zone du plan modifiée pour cet audit devient une zone propre à l'audit (la zone du plan ne change pas)
+        state.area = { zoneId: null, name: state.area.name, pts }; state.pin = centroid(pts); onChange?.('area');
+      });
+      return;
+    }
+    if (t === 'done') { pv?.setEditArea(null); setMode(''); return; }
     if (t === 'clear') { state.area = null; state.pin = null; draw(); onChange?.('clear'); }
   });
   // nom tapé ou choisi dans la liste = zone du plan du même nom → elle s'allume sur le plan
@@ -625,9 +694,9 @@ function zoneKit({ plan, state, nameInput, toolsEl, onChange, color = () => '#F5
     else if (state.area && !state.area.zoneId) { state.area.name = state.zone; draw(); onChange?.('name'); }
   });
   return {
-    viewerOpts: { areas: areas(), onZoneTap: a => { const z = zones().find(x => x.id === a.id); if (z) select(z); } },
+    viewerOpts: { areas: areas(), onZoneTap: a => { if (mode) return; const z = zones().find(x => x.id === a.id); if (z) select(z); } },
     bind(v) { pv = v; draw(); if (state.area?.pts) setTimeout(() => pv.focusArea(state.area.pts), 120); },
-    point(x, y) { state.pin = { x, y }; state.area = null; draw(); onChange?.('pin'); },
+    point(x, y) { if (mode) return; state.pin = { x, y }; state.area = null; draw(); onChange?.('pin'); },
     refresh: draw,
     dispose() { dead = true; },
   };
@@ -1251,6 +1320,77 @@ function exportSheet(insps, opts = {}) {
       } catch (err) { console.error(err); close(); toast('Erreur export : ' + err.message, 4000); }
     }));
 }
+/** Export « données brutes » pour Power BI : des tableaux plats, une ligne = un enregistrement,
+ *  1re ligne = en-têtes, dates en vraies dates, scores en nombres (0–1), identifiants pour relier les feuilles. */
+async function exportPowerBI() {
+  const XLSX = window.XLSX; if (!XLSX) return toast('Excel pas encore chargé, réessayez');
+  const admin = cloud.isAdmin();
+  const projects = await db.all('projects'), plans = await db.all('plans'), subsL = await db.all('subs');
+  const subs = Object.fromEntries(subsL.map(x => [x.id, x]));
+  const insps = (admin ? await db.all('inspections') : await pAll('inspections')).filter(i => !i.deleted).sort((a, b) => a.date.localeCompare(b.date));
+  const acts = (admin ? await db.all('actions') : await pAll('actions')).filter(a => !a.deleted);
+  if (!insps.length) return toast('Aucun audit à exporter');
+  const D = iso => iso ? new Date(iso + 'T12:00:00') : null;
+  const r3 = v => v === null || v === undefined ? null : Math.round(v * 1000) / 1000;
+  const week = iso => { const d = new Date(iso + 'T12:00:00'); d.setDate(d.getDate() + 3 - (d.getDay() + 6) % 7); const y = new Date(d.getFullYear(), 0, 4); return 1 + Math.round(((d - y) / 864e5 - 3 + (y.getDay() + 6) % 7) / 7); };
+  const projName = i => projects.find(p => p.id === pid(i))?.name || '';
+  const who = i => i.inspectors || '';
+  const crName = ref => criterionOfRef(ref)?.name || ref;
+  // 1) Audits : tout l'audit sur une seule ligne (+ une colonne par thème)
+  const auditRows = [];
+  for (const i of insps) {
+    const o = overallScore(i.scores, i.bonus, i.penalty), st = auditState(i), ids = namedSubs(i, subs);
+    const ia = acts.filter(a => a.inspectionId === i.id);
+    const row = {
+      audit_id: i.id, date: D(i.date), annee: +i.date.slice(0, 4), mois: i.date.slice(0, 7), semaine: week(i.date),
+      projet: projName(i), plan: plans.find(p => p.id === i.planId)?.name || '', zone: i.zone || '',
+      groupe_zone_id: i.visitId || '', type_audit: ids.length ? 'Entreprise' : 'Zone',
+      entreprise: ids.map(id => subs[id].name).join(', '), type_entreprise: ids.length === 1 ? typeOf(subs[ids[0]]).label : '',
+      hse: who(i), statut: ST_TAG[st.st], criteres_notes: st.n, criteres_total: 124,
+      score_global: r3(o.pct), bonus: +i.bonus || 0, penalite: +i.penalty || 0,
+      infractions: Object.entries(i.scores || {}).filter(([r, x]) => criterionOfRef(r) && typeof x?.v === 'number' && x.v <= 2).length,
+      photos: Object.values(i.scores || {}).reduce((t, x) => t + (x?.photos || []).length, 0),
+      actions: ia.length, actions_ouvertes: ia.filter(a => a.status !== 'Closed').length, actions_en_retard: ia.filter(isLate).length,
+      bonnes_pratiques: (i.goods || []).length, signe: i.signature ? 'Oui' : 'Non', signataire: i.signature?.name || '', reference: i.ref || '',
+    };
+    for (const t of o.themes) row[`T${String(parseInt(t.theme.ref, 10)).padStart(2, '0')} ${t.theme.name}`] = t.done ? r3(t.pct) : null;
+    auditRows.push(row);
+  }
+  // 2) Critères : une ligne par critère noté (pour les infractions, les thèmes, les tendances)
+  const critRows = [];
+  for (const i of insps) {
+    const ids = namedSubs(i, subs);
+    for (const [ref, x] of Object.entries(i.scores || {})) {
+      const c = criterionOfRef(ref); if (!c || x?.v === null || x?.v === undefined) continue;
+      const th = themeOfRef(ref), na = x.v === NA;
+      critRows.push({ audit_id: i.id, date: D(i.date), projet: projName(i), zone: i.zone || '', entreprise: ids.map(id => subs[id].name).join(', '), hse: who(i),
+        theme_ref: th.ref, theme: th.name, critere_ref: ref, critere: crName(ref), note: na ? null : x.v, na: na ? 'Oui' : 'Non',
+        infraction: !na && x.v <= 2 ? 1 : 0, regle_vitale: /LSR/.test(th.name) ? 'Oui' : 'Non', commentaire: x.c || '', photos: (x.photos || []).length });
+    }
+  }
+  // 3) Actions : une ligne par action corrective
+  const actRows = acts.map(a => {
+    const i = insps.find(x => x.id === a.inspectionId);
+    const late = isLate(a), due = a.dueDate ? D(a.dueDate) : null;
+    return { action_id: a.id, audit_id: a.inspectionId || '', date_audit: i ? D(i.date) : null, projet: i ? projName(i) : (projects.find(p => p.id === a.projectId)?.name || ''),
+      zone: i?.zone || '', entreprise: subs[a.subId]?.name || '', hse: i ? who(i) : '', critere_ref: a.critRef || '', critere: a.critRef ? crName(a.critRef) : '',
+      constat: a.observation || '', action_corrective: a.corrective || '', responsable: a.responsibility || '', priorite: a.priority || '', statut: a.status || '',
+      echeance: due, cloturee_le: a.closedAt ? D(a.closedAt) : null, en_retard: late ? 'Oui' : 'Non',
+      jours_de_retard: late && due ? Math.max(0, Math.round((Date.now() - due) / 864e5)) : 0, photos_avant: (a.photos || []).length, photos_apres: (a.photosAfter || []).length };
+  });
+  const wb = XLSX.utils.book_new();
+  const add = (rows, name, widths) => {
+    const ws = XLSX.utils.json_to_sheet(rows, { cellDates: true, dateNF: 'dd/mm/yyyy' });
+    const keys = Object.keys(rows[0] || {}); ws['!cols'] = keys.map(k => ({ wch: widths?.[k] || Math.min(40, Math.max(10, k.length + 2)) }));
+    if (rows.length) ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: rows.length, c: keys.length - 1 } }) };
+    XLSX.utils.book_append_sheet(wb, ws, name);
+  };
+  add(auditRows, 'Audits', { entreprise: 22, hse: 18, projet: 14, zone: 16, reference: 26 });
+  add(critRows, 'Criteres', { theme: 30, critere: 40, commentaire: 40, entreprise: 22 });
+  if (actRows.length) add(actRows, 'Actions', { constat: 40, action_corrective: 40, critere: 34, entreprise: 22 });
+  const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array', cellDates: true, compression: true });
+  readySheet(new File([out], `AuditHSE-donnees-${todayISO()}.xlsx`, { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+}
 function readySheet(file) {
   // Le partage iOS doit être déclenché par un tap : d'où cette 2e étape
   openSheet(`<h3>Fichier prêt</h3><p><b>${esc(file.name)}</b> · ${(file.size / 1024).toFixed(0)} Ko</p>
@@ -1768,7 +1908,11 @@ const auditF = { q: '', st: '', sub: '', hse: '' };
 const openMonths = new Set();
 const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
 async function vAudits(q) {
-  setTop({ title: 'Audits' });
+  // en haut à droite : Excel d'un toucher, et le Pilotage (admin)
+  setTop({ title: 'Audits', actions: [
+    ...(cloud.isAdmin() ? [{ icon: 'chart', aria: 'Pilotage', onClick: () => location.hash = '#/stats' }] : []),
+    ...(cloud.can('export') ? [{ icon: 'download', aria: 'Exporter en Excel', onClick: () => exportPowerBI().catch(e => toast('Erreur export : ' + e.message, 4000)) }] : []),
+  ] });
   if (q?.get('hse') !== null && q?.get('hse') !== undefined) { auditF.hse = q.get('hse'); auditF.sub = ''; auditF.st = ''; }
   if (auditSub) { auditF.sub = auditSub; auditSub = ''; }
   const [{ subs, subList }, insps] = await Promise.all([maps(), pAll('inspections')]);
@@ -1962,6 +2106,24 @@ function scoreBars(pts) {
 
 // ---------- plans ----------
 // ---------- gestion des projets (admin) ----------
+/** Nouvelle version du même plan (photo aérienne plus récente…) : audits, épingles et zones restent à leur place */
+async function replacePlanImage(f, plan) {
+  if (!await confirmBox('Mettre à jour l’image du plan ?', 'Les audits, épingles et zones restent sur ce plan. La nouvelle image doit montrer exactement le même cadrage (même emprise, même orientation), sinon les épingles seront décalées.', 'Mettre à jour', 'primary')) return null;
+  let page = 1;
+  if (/pdf/i.test(f.type) || /\.pdf$/i.test(f.name)) {
+    const n = await pdfPageCount(f);
+    if (n > 1) page = await ask('Quelle page importer ?', `Le PDF contient ${n} pages.`, [...Array(Math.min(n, 12))].map((_, i) => ({ label: 'Page ' + (i + 1), value: i + 1 })));
+    if (!page) return null;
+  }
+  toast('Conversion du plan…', 6000);
+  const { blob } = await planFileToBlob(f, page);
+  const old = plan.blobId;
+  plan.blobId = await db.putBlob(blob); plan.imageDate = todayISO();
+  await db.put('plans', plan);
+  if (old && old !== plan.blobId) db.deleteBlob(old).catch(() => {});
+  toast('Image du plan mise à jour');
+  return plan;
+}
 async function importPlanFile(f, projectId) {
   let page = 1;
   if (/pdf/i.test(f.type) || /\.pdf$/i.test(f.name)) {
@@ -2009,10 +2171,19 @@ async function vZones(id) {
   view.innerHTML = `
     <p class="muted small" style="margin:0 2px 8px">Tracez les zones du chantier une fois pour toutes : pendant un audit, un toucher sur la zone la sélectionne et remplit son nom.</p>
     <div id="zmap" class="pv zones-map"></div>
-    <div class="plan-tools"><button class="btn primary" id="zdraw">${ic('edit', 18)} Tracer une nouvelle zone</button></div>
+    <div class="plan-tools ztools" id="ztools"></div>
     <div class="section-head"><span>Zones</span><span class="muted small" id="zcount"></span></div>
     <div id="zlist"></div>`;
-  const areas = () => plan.zones.map(z => ({ id: z.id, pts: z.pts, kind: 'zone', label: z.name }));
+  let mode = '', nPts = 0, editing = null;
+  const areas = () => mode === 'rect' || mode === 'poly' ? [] : plan.zones.filter(z => z !== editing).map(z => ({ id: z.id, pts: z.pts, kind: 'zone', label: z.name }));
+  const B = (zt, icon, label, cls = '') => `<button type="button" class="btn ${cls}" data-zt="${zt}" ${cls === 'disabled' ? 'disabled' : ''}>${ic(icon, 18)} ${label}</button>`;
+  const tools = () => { $('#ztools').innerHTML =
+      mode === 'choose' ? `${B('rect', 'fit', 'Rectangle')}${B('poly', 'edit', 'Forme libre')}${B('cancel', 'x', 'Annuler')}`
+      : mode === 'rect' ? `<p class="zhint">Glissez le doigt sur le plan pour tracer le rectangle.</p>${B('cancel', 'x', 'Annuler')}`
+      : mode === 'poly' ? `<p class="zhint">Touchez les coins un par un (${nPts} posé${nPts > 1 ? 's' : ''}). Touchez le 1er coin ou « Terminer ».</p>${B('undo', 'back', 'Retour', nPts ? '' : 'disabled')}${B('finish', 'check', 'Terminer', nPts >= 3 ? 'primary' : 'disabled')}${B('cancel', 'x', 'Annuler')}`
+      : mode === 'edit' ? `<p class="zhint">${esc(editing?.name || '')} : glissez un coin, un point jaune pour ajouter un coin, ou l’intérieur pour déplacer.</p>${B('done', 'check', 'Terminer', 'primary')}`
+      : B('draw', 'edit', 'Tracer une nouvelle zone', 'primary'); };
+  const setMode = m => { mode = m; nPts = 0; pv.setDrawMode(m === 'rect' || m === 'poly', onDrawn, m === 'poly' ? 'poly' : 'rect', n => { nPts = n; tools(); }); if (m !== 'edit') { pv.setEditArea(null); editing = null; } pv.setAreas(areas()); tools(); };
   let pv = null;
   const drawList = () => {
     $('#zcount').textContent = plan.zones.length;
@@ -2023,21 +2194,22 @@ async function vZones(id) {
       : '<div class="empty">Aucune zone pour le moment.<br>Touchez « Tracer une nouvelle zone ».</div>';
     pv?.setAreas(areas());
   };
+  const startEdit = z => { setMode('edit'); editing = z; pv.setAreas(areas()); pv.focusArea(z.pts); pv.setEditArea(z.pts, async pts => { z.pts = pts; await save(); }); tools(); };
   const editZone = z => openSheet(`<h3>Zone</h3><label class="f" style="margin-top:0">Nom</label><input class="in" id="zr" value="${esc(z.name)}">
+    <button class="btn block" id="zshape" style="margin-top:12px">${ic('fit', 18)} Modifier la forme</button>
     <div class="btns" style="margin-top:14px"><button class="btn danger" id="zd">${ic('trash', 18)} Supprimer</button><button class="btn primary" id="zo">Enregistrer</button></div>`,
   (el, close) => {
+    el.querySelector('#zshape').onclick = () => { close(); startEdit(z); };
     el.querySelector('#zo').onclick = async () => { z.name = el.querySelector('#zr').value.trim() || z.name; await save(); close(); drawList(); };
     el.querySelector('#zd').onclick = async () => { if (!await confirmBox(`Supprimer la zone ${z.name} ?`, 'Les audits déjà faits gardent leur zone.', 'Supprimer')) return; plan.zones = plan.zones.filter(x => x !== z); await save(); close(); drawList(); };
   });
   pv = createPlanViewer($('#zmap'), {
     imageURL: await db.blobURL(plan.blobId), pins: [], areas: areas(), cover: 2.4,
-    onZoneTap: a => { const z = plan.zones.find(x => x.id === a.id); if (z) editZone(z); },
+    onZoneTap: a => { if (mode) return; const z = plan.zones.find(x => x.id === a.id); if (z) editZone(z); },
   });
   onCleanup(() => pv.destroy());
-  let drawing = false;
-  const setDraw = on => { drawing = on; pv.setDrawMode(on, onDrawn); $('#zdraw').classList.toggle('on', on); $('#zdraw').innerHTML = `${ic('edit', 18)} ${on ? 'Tracez sur le plan… (toucher pour annuler)' : 'Tracer une nouvelle zone'}`; };
   const onDrawn = pts => {
-    setDraw(false);
+    setMode('');
     openSheet(`<h3>Nouvelle zone</h3><label class="f" style="margin-top:0">Nom de la zone</label><input class="in" id="zn" placeholder="ex. DCH2 nord, UTI 12…" autocomplete="off">
       <div class="btns" style="margin-top:14px"><button class="btn" data-close>Annuler</button><button class="btn primary" id="zok">Ajouter</button></div>`,
     (el, close) => {
@@ -2048,7 +2220,15 @@ async function vZones(id) {
       };
     });
   };
-  $('#zdraw').onclick = () => setDraw(!drawing);
+  $('#ztools').addEventListener('click', e => {
+    const t = e.target.closest('[data-zt]:not([disabled])')?.dataset.zt; if (!t) return;
+    if (t === 'draw') setMode('choose');
+    else if (t === 'rect' || t === 'poly') setMode(t);
+    else if (t === 'undo') pv.undoPoly();
+    else if (t === 'finish') pv.finishPoly();
+    else if (t === 'cancel' || t === 'done') { setMode(''); drawList(); }
+  });
+  tools();
   $('#zlist').addEventListener('change', async e => { const z = plan.zones.find(x => x.id === e.target.dataset.zn); if (z) { z.name = e.target.value.trim() || z.name; await save(); pv.setAreas(areas()); } });
   $('#zlist').addEventListener('click', async e => {
     const f = e.target.closest('[data-zfocus]'); if (f) { const z = plan.zones.find(x => x.id === f.dataset.zfocus); pv.focusArea(z.pts); $('#zmap').scrollIntoView({ block: 'center', behavior: 'smooth' }); return; }
@@ -2086,7 +2266,10 @@ async function vProject(id) {
     ${isNew ? `<button class="btn primary big" id="create">Créer le projet</button>` : `
     <div class="section-head"><span>Plans</span><span class="muted small">${plans.length}</span></div>
     ${plans.map(x => `<div class="card row plan-row" data-plan="${x.id}"><img class="plan-thumb" data-img="${x.blobId}">
-      <input class="in grow" data-pn="${x.id}" value="${esc(x.name)}"><a class="btn small-btn" href="#/plan/${x.id}/zones">${ic('map', 18)} Zones${(x.zones || []).length ? ` (${x.zones.length})` : ''}</a><button class="btn danger small-btn" data-pdel="${x.id}" aria-label="Supprimer">${ic('trash', 18)}</button></div>`).join('')}
+      <input class="in grow" data-pn="${x.id}" value="${esc(x.name)}"><a class="btn small-btn" href="#/plan/${x.id}/zones">${ic('map', 18)} Zones${(x.zones || []).length ? ` (${x.zones.length})` : ''}</a>
+      <label class="btn small-btn" title="Nouvelle image du même plan (épingles et zones conservées)" aria-label="Mettre à jour l’image">${ic('upload', 18)}<input type="file" accept="image/*,application/pdf,.pdf" class="hidden-input" data-prep="${x.id}"></label>
+      <button class="btn danger small-btn" data-pdel="${x.id}" aria-label="Supprimer">${ic('trash', 18)}</button></div>`).join('')}
+    ${plans.length ? '<p class="muted small" style="margin:-2px 2px 8px">' + ic('upload', 14) + ' = nouvelle image du même plan : audits, épingles et zones restent en place.</p>' : ''}
     <label class="btn block">${ic('upload')} Ajouter un plan (image ou PDF)<input type="file" accept="image/*,application/pdf,.pdf" class="hidden-input" id="p-in"></label>
     <div class="section-head"><span>Entreprises du projet</span><span class="muted small" id="ncomp">${(p.companyIds || []).length} sélectionnée(s)</span></div>
     <p class="muted small" style="margin:-4px 2px 8px">Cochez les entreprises qui travaillent sur ce projet. <a href="#/companies">Gérer l’annuaire</a></p>
@@ -2123,6 +2306,10 @@ async function vProject(id) {
     };
     return;
   }
+  view.querySelectorAll('[data-prep]').forEach(inp => inp.onchange = async e => {
+    const f = e.target.files[0]; if (!f) return;
+    try { if (await replacePlanImage(f, plans.find(x => x.id === inp.dataset.prep))) render(); } catch (err) { toast('Import impossible : ' + err.message, 4000); }
+  });
   $('#p-in').onchange = async e => { const f = e.target.files[0]; if (!f) return; try { await importPlanFile(f, p.id); render(); } catch (err) { toast('Import impossible : ' + err.message, 4000); } };
   view.addEventListener('click', async e => {
     const d = e.target.closest('[data-pdel]'); if (!d) return;
@@ -2203,15 +2390,26 @@ async function vSettings() {
         <input type="checkbox" class="switch" id="share-ph" ${st.sharePhotos === false ? '' : 'checked'}></label>
       <label class="f">Affichage</label><div class="seg" id="theme">${[['auto', 'Auto'], ['light', 'Clair'], ['dark', 'Sombre']].map(([v, l]) => `<button data-val="${v}" class="${st.theme === v ? 'on' : ''}">${l}</button>`).join('')}</div>
     </div>
-    ${cloud.isAdmin() ? `<div class="section-head"><span>Administration</span></div>
+    ${cloud.isAdmin() ? `<div class="section-head"><span>Apparence de l’app</span></div>
+    <div class="card brand-card">
+      <div class="logo-box brand-logo" id="b-logo"><img alt="" src="${esc(BRAND.logo)}"></div>
+      <div class="grow">
+        <label class="f" style="margin-top:0">Nom de l’app</label><input class="in" id="b-name" value="${esc(BRAND.name)}" maxlength="24" autocomplete="off">
+        <div class="row" style="gap:6px;margin-top:8px"><label class="btn grow small-btn">${ic('upload', 18)} Changer le logo<input type="file" accept="image/*" class="hidden-input" id="b-in"></label>
+          ${BRAND.logoId ? `<button class="btn small-btn" id="b-reset">Logo d’origine</button>` : ''}</div>
+      </div>
+      <p class="muted small" style="margin:8px 0 0;flex-basis:100%">Visible par toute l’équipe. L’icône de l’écran d’accueil se met à jour quand on réinstalle l’app.</p>
+    </div>
+    <div class="section-head"><span>Administration</span></div>
     <div class="menu-list">
+
       <a href="#/projects">${ic('map')}<span class="grow"><b>Projets et plans</b><small>${esc(PROJECT?.name || '')} · changer, créer, archiver</small></span>${ic('chevron')}</a>
       <a href="#/companies">${ic('building')}<span class="grow"><b>Annuaire des entreprises</b><small>Sous-traitants et prestataires</small></span>${ic('chevron')}</a>
       ${cloud.enabled ? `<a href="#/team">${ic('list')}<span class="grow"><b>Équipe et accès</b><small>Invitations, droits, projets autorisés</small></span>${ic('chevron')}</a>` : ''}
     </div>` : ''}
     <button class="btn block" id="scale" style="margin-bottom:10px">Barème de notation (Notes)</button>
     ${cloud.can('export') ? `<h2>Exports</h2>
-    <button class="btn block primary" id="x-all" style="margin-bottom:10px">Excel — tous les audits du projet</button>` : ''}
+    <button class="btn block" id="x-all" style="margin-bottom:10px">Excel — tous les audits du projet (format PRT)</button>` : ''}
     <h2>Données</h2>
     <button class="btn block danger" id="reset" style="margin-bottom:10px">${ic('trash')} Effacer tous les audits</button>
     <h2>Sauvegarde</h2>
@@ -2241,7 +2439,19 @@ async function vSettings() {
     for (const a of await pAll('actions')) await db.remove('actions', a.id);
     toast('Tous les audits ont été effacés'); location.hash = '#/';
   };
+  if ($('#x-bi')) $('#x-bi').onclick = () => exportPowerBI().catch(e => toast('Erreur export : ' + e.message, 4000));
   if ($('#x-all')) $('#x-all').onclick = async () => { const all = (await pAll('inspections')).sort((a, b) => a.date.localeCompare(b.date)); if (!all.length) return toast('Aucune inspection'); exportSheet(all, { allActions: true }); };
+  // apparence : nom et logo appliqués à tous les projets (donc à toute l'équipe en mode équipe)
+  const setBrand = async (patch) => {
+    for (const pr of await db.all('projects')) { Object.assign(pr, patch); await db.put('projects', pr); }
+    BRAND.applied = false; await loadProject(); await applyBrand();
+  };
+  $('#b-name')?.addEventListener('change', async e => { await setBrand({ appName: e.target.value.trim() || 'Audit HSE' }); toast('Nom de l’app enregistré'); });
+  $('#b-in')?.addEventListener('change', async e => {
+    const f = e.target.files[0]; if (!f) return;
+    const id = await db.putBlob(await compressImage(f, 512, 0.92)); await setBrand({ appLogoId: id }); toast('Logo enregistré'); render();
+  });
+  $('#b-reset')?.addEventListener('click', async () => { await setBrand({ appLogoId: null }); toast('Logo d’origine'); render(); });
   $('#bk').onclick = backupNow;
   if ($('#rs')) $('#rs').onchange = async e => {
     const f = e.target.files[0]; if (!f) return;
@@ -2272,7 +2482,7 @@ async function shareInvite(email, name, code) {
   // le code d'invitation protège le compte : sans lui, personne d'autre ne peut créer le compte à cette adresse
   if (!code) code = (await cloud.inviteCode(email).catch(() => null)) || '';
   const link = inviteLink(email, name, code);
-  const text = `Bonjour${name ? ' ' + name.split(' ')[0] : ''}, voici ton accès à l’application PRT HSE : ${link}\n1. Ouvre le lien dans Safari\n2. « Créer mon compte » avec ${email}${code ? ` (code d’invitation : ${code})` : ''}\n3. Partager → « Sur l’écran d’accueil »\nCe lien est personnel : ne le transfère pas.`;
+  const text = `Bonjour${name ? ' ' + name.split(' ')[0] : ''}, voici ton accès à l’application ${BRAND.name} : ${link}\n1. Ouvre le lien dans Safari\n2. « Créer mon compte » avec ${email}${code ? ` (code d’invitation : ${code})` : ''}\n3. Partager → « Sur l’écran d’accueil »\nCe lien est personnel : ne le transfère pas.`;
   openSheet(`<h3>Invitation prête</h3>
     <p class="muted">Envoyez ce lien à <b>${esc(name || email)}</b> uniquement : il contient son code d’invitation personnel${code ? ` (<b>${esc(code)}</b>)` : ''}.</p>
     <div class="invite-link">${esc(link)}</div>
@@ -2281,7 +2491,7 @@ async function shareInvite(email, name, code) {
       <button class="btn block" data-c>Copier le message</button>
       <button class="btn block" data-close>Fermer</button></div>`,
   (el, close) => {
-    el.querySelector('[data-s]')?.addEventListener('click', async () => { try { await navigator.share({ title: 'Accès PRT HSE', text }); close(); } catch { /* annulé */ } });
+    el.querySelector('[data-s]')?.addEventListener('click', async () => { try { await navigator.share({ title: 'Accès ' + BRAND.name, text }); close(); } catch { /* annulé */ } });
     el.querySelector('[data-c]').onclick = async () => { try { await navigator.clipboard.writeText(text); toast('Message copié'); } catch { toast('Copie impossible'); } };
   });
 }
@@ -2515,17 +2725,19 @@ async function vStats() {
       <div id="inf-rows">${infDash()}</div>
     </div>
 
-    <button class="btn block primary" id="st-x" style="margin-top:12px">${ic('download')} Exporter ces statistiques (Excel)</button>`;
+    <button class="btn block primary" id="st-x" style="margin-top:12px">${ic('download')} Exporter ces statistiques (Excel)</button>
+    <button class="btn block" id="st-bi" style="margin-top:8px">${ic('download')} Excel données (Power BI) — une ligne par audit</button>`;
   view.addEventListener('click', e => {
     const p = e.target.closest('[data-per]'); if (p) { statsF.period = +p.dataset.per; render(); return; }
     const sc = e.target.closest('[data-scope]'); if (sc) { statsF.scope = sc.dataset.scope; render(); return; }
     if (e.target.closest('#hse-more')) { view.querySelector('.hse-list').classList.add('all'); e.target.closest('#hse-more').remove(); return; }
   });
   $('#inf-sub')?.addEventListener('change', e => { statsF.infSub = e.target.value; e.target.classList.toggle('set', !!statsF.infSub); $('#inf-rows').innerHTML = infDash(); });
+  $('#st-bi').onclick = () => exportPowerBI().catch(e => toast('Erreur export : ' + e.message, 4000));
   $('#st-x').onclick = () => {
     const XLSX = window.XLSX, wb = XLSX.utils.book_new();
     const period = statsF.period ? `${statsF.period} derniers jours` : 'toute la période';
-    const head = [['PRT HSE — Pilotage'], [`Périmètre : ${scopeName} · ${period} · édité le ${dateFR(todayISO())}`], []];
+    const head = [[BRAND.name + ' — Pilotage'], [`Périmètre : ${scopeName} · ${period} · édité le ${dateFR(todayISO())}`], []];
     const sh1 = XLSX.utils.aoa_to_sheet([...head, ['HSE', 'Audits', 'Score moyen', 'Actions ouvertes', 'Dernier audit'], ...byHse.map(x => [x.n, x.l.length, x.avg === null ? '' : Math.round(x.avg * 1000) / 10 + ' %', x.open, dateFR(x.last)])]);
     const sh2 = XLSX.utils.aoa_to_sheet([...head, ['Entreprise', 'Type', 'Audits', 'Score moyen', 'Actions ouvertes'], ...bySub.map(x => [x.s?.name, typeOf(x.s).label, x.l.length, x.avg === null ? '' : Math.round(x.avg * 1000) / 10 + ' %', x.open])]);
     const sh3 = XLSX.utils.aoa_to_sheet([...head, ['Date', 'Projet', 'Entreprise', 'HSE', 'Référence', 'Score'], ...insps.sort((a, b) => a.date.localeCompare(b.date)).map(i => [dateFR(i.date), projects.find(p => p.id === pid(i))?.name || '', auditLabel(i, subs), who(i), i.ref, pctOf(i) === null ? '' : Math.round(pctOf(i) * 1000) / 10 + ' %'])]);
@@ -2666,7 +2878,7 @@ function drawSideFoot() {
   const f = document.getElementById('side-foot'); if (!f) return;
   f.innerHTML = PROJECT ? `<button type="button" class="side-proj"><span class="side-dot" style="background:${esc(PROJECT.color || '#1A56A8')}">${esc(abbr(PROJECT.name))}</span>
     <span class="side-pname"><b>${esc(PROJECT.name)}</b><small>${esc(PROJECT.site || 'Projet actif')} · changer</small></span></button>
-    <span class="side-ver">PRT HSE · v${APP_VERSION}</span>` : '';
+    <span class="side-ver">${esc(BRAND.name)} · v${APP_VERSION}</span>` : '';
   f.querySelector('.side-proj')?.addEventListener('click', () => projectSheet());
 }
 async function render() {
@@ -2674,7 +2886,7 @@ async function render() {
   cleanups.forEach(f => { try { f(); } catch { /* ignore */ } }); cleanups = [];
   document.querySelectorAll('.sheet-bg, .kghost, .pviewer, .annot').forEach(s => s.remove());
   if (PROJECT) await loadProject(); // projet actif relu à chaque écran (entreprises cochées, nom, plans…)
-  drawSideFoot();
+  await applyBrand(); drawSideFoot();
   // nouveau nœud pour supprimer les écouteurs de l'écran précédent
   const fresh = view.cloneNode(false); view.replaceWith(fresh); view = fresh;
   fresh.className = ''; // chaque écran repart d'une mise en page neutre (sinon le mode « plan » restait actif)
@@ -2776,6 +2988,7 @@ new MutationObserver(ms => ms.forEach(m => m.addedNodes.forEach(n => {
   if ('serviceWorker' in navigator) watchUpdates();
   if (!(await db.getMeta('seeded-v3')) || !(await db.getMeta('ids-v3'))) await loadSeed(); // données de départ privées : premier démarrage (ou très ancienne installation)
   try { await cloud.init(); } catch (e) { console.error('cloud', e); }
+  await applyBrand().catch(() => {});
   if (cloud.enabled && !cloud.session) return showLogin();
   await startApp();
 })();
@@ -2823,7 +3036,7 @@ function showLogin() {
     view.innerHTML = `
       <div class="login">
         <div class="login-logo"><img src="icons/icon-192.png" alt=""></div>
-        <h1>PRT HSE</h1>
+        <h1>${esc(BRAND.name)}</h1>
         <p class="muted">Inspections HSE · Site HSE Performance Rating</p>
         <div class="tabs3 two"><button type="button" data-m="in" class="${mode === 'in' ? 'on' : ''}">Se connecter</button><button type="button" data-m="up" class="${mode === 'up' ? 'on' : ''}">Créer mon compte</button></div>
         <form id="lf" autocomplete="on">

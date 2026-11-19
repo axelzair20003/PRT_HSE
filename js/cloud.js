@@ -127,7 +127,7 @@ export function sync() {
 }
 
 const photosOf = (store, r) => store === 'inspections' ? [...Object.values(r.scores || {}).flatMap(s => s?.photos || []), ...(r.goods || []).flatMap(g => g.photos || []), r.signature?.blobId]
-  : store === 'actions' ? [...(r.photos || []), ...(r.photosAfter || [])] : store === 'plans' ? [r.blobId] : store === 'projects' ? [r.logoId, r.logo2Id] : store === 'subs' ? [r.logoId] : [];
+  : store === 'actions' ? [...(r.photos || []), ...(r.photosAfter || [])] : store === 'plans' ? [r.blobId] : store === 'projects' ? [r.logoId, r.logo2Id, r.appLogoId] : store === 'subs' ? [r.logoId] : [];
 const blobPath = (store, owner, id) => ADMIN_ONLY.includes(store) ? { bucket: 'shared', path: id } : { bucket: 'photos', path: `${owner}/${id}` };
 
 async function push() {

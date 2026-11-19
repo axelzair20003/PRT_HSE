@@ -1,6 +1,6 @@
 {
-  "name": "PRT HSE — Site HSE Performance Rating Tool",
-  "short_name": "PRT HSE",
+  "name": "Audit HSE — Inspections chantier",
+  "short_name": "Audit HSE",
   "description": "Inspections HSE des sous-traitants sur chantier, hors ligne.",
   "lang": "fr",
   "start_url": "./",

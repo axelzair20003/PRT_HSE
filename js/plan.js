@@ -21,9 +21,11 @@ export function createPlanViewer(container, opts) {
   // zones : [{ id, pts:[{x,y}], color, label, kind: 'zone' (zone du plan) | 'area' (zone d'un audit) | 'sel' (sélection en cours) }]
   let areas = opts.areas || [];
   let drawMode = false, onDrawn = null, draft = null;
+  // forme libre : on touche les coins un par un ; édition : coins / milieux / intérieur déplaçables
+  let shape = 'rect', poly = [], onProgress = null, edit = null, drag = null;
   container.classList.add('pv');
   container.innerHTML = `
-    <div class="pv-stage"><img class="pv-img" alt="Plan" draggable="false"><svg class="pv-areas" preserveAspectRatio="none"></svg><div class="pv-alabels"></div><div class="pv-pins"></div></div>
+    <div class="pv-stage"><img class="pv-img" alt="Plan" draggable="false"><svg class="pv-areas" preserveAspectRatio="none"></svg><div class="pv-alabels"></div><div class="pv-pins"></div><div class="pv-handles"></div></div>
     <div class="pv-ctrl">
       <button type="button" data-z="in" aria-label="Zoom avant">${ic('plus')}</button>
       <button type="button" data-z="out" aria-label="Zoom arrière">${ic('minus')}</button>
@@ -32,17 +34,33 @@ export function createPlanViewer(container, opts) {
   const stage = container.querySelector('.pv-stage');
   const img = container.querySelector('.pv-img');
   const layer = container.querySelector('.pv-pins');
-  const svg = container.querySelector('.pv-areas'), alabels = container.querySelector('.pv-alabels');
+  const svg = container.querySelector('.pv-areas'), alabels = container.querySelector('.pv-alabels'), handles = container.querySelector('.pv-handles');
   const NS = 'http://www.w3.org/2000/svg';
   // un nom de zone n'apparaît que si la zone est assez large à l'écran (sinon les noms se chevauchent)
   const fitLabels = () => alabels.querySelectorAll('.pv-alabel').forEach(el => {
     if (el.classList.contains('k-sel')) return;
-    el.classList.toggle('pv-hide', +el.dataset.aw * s < Math.min(80, el.offsetWidth * 0.6 + 24));
+    const need = el.classList.contains('k-zone') ? 150 : Math.min(80, el.offsetWidth * 0.6 + 24);
+    el.classList.toggle('pv-hide', +el.dataset.aw * s < need);
   });
   const renderAreas = () => {
     svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.style.width = W + 'px'; svg.style.height = H + 'px';
     svg.innerHTML = ''; alabels.innerHTML = '';
-    const all = draft ? [...areas, { id: '_draft', pts: draft, kind: 'sel', color: '#F5C400' }] : areas;
+    const all = draft ? [...areas, { id: '_draft', pts: draft, kind: 'sel', color: '#F5C400' }]
+      : edit ? [...areas, { id: '_edit', pts: edit.pts, kind: 'sel', color: '#F5C400' }] : areas;
+    handles.innerHTML = '';
+    const hd = (p, cls, i) => { const h = document.createElement('span'); h.className = 'pv-h ' + cls; h.dataset.i = i; h.style.left = p.x * W + 'px'; h.style.top = p.y * H + 'px'; handles.appendChild(h); };
+    if (drawMode && shape === 'poly' && poly.length) {
+      if (poly.length >= 2) {
+        const pl = document.createElementNS(NS, 'polyline');
+        pl.setAttribute('points', poly.map(p => `${p.x * W},${p.y * H}`).join(' ')); pl.setAttribute('class', 'pv-area k-sel pv-open');
+        svg.appendChild(pl);
+      }
+      poly.forEach((p, i) => hd(p, i === 0 && poly.length >= 3 ? 'first' : '', i));
+    }
+    if (edit) {
+      edit.pts.forEach((p, i) => hd(p, '', i));
+      edit.pts.forEach((p, i) => { const q = edit.pts[(i + 1) % edit.pts.length]; hd({ x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 }, 'mid', 'm' + i); });
+    }
     for (const a of all) {
       if (!a.pts || a.pts.length < 3) continue;
       const poly = document.createElementNS(NS, 'polygon');
@@ -139,11 +157,19 @@ export function createPlanViewer(container, opts) {
     if (e.target.closest('.pv-ctrl')) return;
     container.setPointerCapture?.(e.pointerId);
     pts.set(e.pointerId, rel(e));
-    if (pts.size === 1 && drawMode) { // dessin d'un rectangle : le doigt trace, le plan ne bouge pas
+    if (pts.size === 1 && edit) { // édition : un coin, un milieu (ajoute un coin) ou l'intérieur (déplace tout)
+      const h = e.target.closest?.('.pv-h'), p = rel(e), q = { x: (p.x - tx) / s / W, y: (p.y - ty) / s / H };
+      if (h && h.dataset.i[0] === 'm') { const i = +h.dataset.i.slice(1); edit.pts.splice(i + 1, 0, { ...q }); drag = { v: i + 1 }; }
+      else if (h) drag = { v: +h.dataset.i };
+      else if (inside(edit.pts, q.x, q.y)) drag = { all: q, orig: edit.pts.map(x => ({ ...x })) };
+      if (drag) { start = null; last = [...pts.values()].map(r => ({ ...r })); navigator.vibrate?.(10); renderAreas(); return; }
+    }
+    if (pts.size === 2 && drag) { drag = null; }
+    if (pts.size === 1 && drawMode && shape === 'rect') { // dessin d'un rectangle : le doigt trace, le plan ne bouge pas
       const p = rel(e); draftStart = { x: (p.x - tx) / s / W, y: (p.y - ty) / s / H }; draft = null; start = null;
       last = [...pts.values()].map(q => ({ ...q })); return;
     }
-    if (pts.size === 2 && drawMode) { draftStart = null; draft = null; renderAreas(); }
+    if (pts.size === 2 && drawMode && shape === 'rect') { draftStart = null; draft = null; renderAreas(); }
     if (pts.size === 1) {
       start = { ...rel(e), t: Date.now(), target: e.target }; multi = false; panning = false;
       const pinEl = e.target.closest?.('.pin');
@@ -160,6 +186,12 @@ export function createPlanViewer(container, opts) {
     if (!pts.has(e.pointerId)) return;
     pts.set(e.pointerId, rel(e));
     const cur = [...pts.values()];
+    if (drag && cur.length === 1) {
+      const q = cur[0], x = clamp01((q.x - tx) / s / W), y = clamp01((q.y - ty) / s / H);
+      if (drag.all) { const dx = x - drag.all.x, dy = y - drag.all.y; edit.pts = drag.orig.map(p => ({ x: clamp01(p.x + dx), y: clamp01(p.y + dy) })); }
+      else edit.pts[drag.v] = { x, y };
+      renderAreas(); return;
+    }
     if (drawMode && draftStart && cur.length === 1) {
       const q = cur[0], x = clamp01((q.x - tx) / s / W), y = clamp01((q.y - ty) / s / H), a = draftStart;
       draft = [{ x: a.x, y: a.y }, { x, y: a.y }, { x, y }, { x: a.x, y }]; renderAreas(); return;
@@ -188,6 +220,7 @@ export function createPlanViewer(container, opts) {
     const p = rel(e);
     pts.delete(e.pointerId);
     clearTimeout(holdTimer);
+    if (drag) { drag = null; last = [...pts.values()].map(q => ({ ...q })); start = null; edit?.onChange?.(edit.pts.map(q => ({ ...q }))); return; }
     if (drawMode && draftStart) {
       const d = draft; draftStart = null; draft = null; renderAreas();
       if (d && Math.abs(d[2].x - d[0].x) * W > 12 && Math.abs(d[2].y - d[0].y) * H > 12) onDrawn?.(d);
@@ -202,6 +235,11 @@ export function createPlanViewer(container, opts) {
     if (pts.size === 0 && start && !multi) {
       const moved = Math.hypot(p.x - start.x, p.y - start.y);
       if (!panning && moved < 14 && Date.now() - start.t < 700) {
+        if (drawMode && shape === 'poly') { // forme libre : chaque toucher pose un coin ; toucher le 1er coin ferme la forme
+          const x = clamp01((p.x - tx) / s / W), y = clamp01((p.y - ty) / s / H);
+          if (poly.length >= 3 && Math.hypot((poly[0].x - x) * W * s, (poly[0].y - y) * H * s) < 26) { api.finishPoly(); start = null; return; }
+          poly.push({ x, y }); renderAreas(); onProgress?.(poly.length); navigator.vibrate?.(8); start = null; return;
+        }
         const pinEl = start.target.closest?.('.pin');
         const hit = pinEl && shown.find(q => q.id === pinEl.dataset.pid);
         if (hit?.cluster) {
@@ -236,15 +274,24 @@ export function createPlanViewer(container, opts) {
   });
   ro.observe(container);
 
-  return {
+  const api = {
     setPins(p) { pins = p; renderPins(); },
     setAreas(a) { areas = a || []; if (W > 1) renderAreas(); },
-    /** mode dessin : le doigt trace un rectangle, cb(points) à la fin */
-    setDrawMode(on, cb) { drawMode = !!on; onDrawn = cb || null; draft = null; draftStart = null; container.classList.toggle('pv-drawing', drawMode); if (W > 1) renderAreas(); },
+    /** mode dessin : 'rect' = le doigt trace un rectangle ; 'poly' = on touche les coins (forme libre). cb(points) à la fin */
+    setDrawMode(on, cb, kind = 'rect', progress = null) {
+      drawMode = !!on; onDrawn = cb || null; draft = null; draftStart = null; shape = kind; poly = []; onProgress = progress;
+      container.classList.toggle('pv-drawing', drawMode && shape === 'rect'); container.classList.toggle('pv-poly', drawMode && shape === 'poly');
+      if (W > 1) renderAreas();
+    },
+    undoPoly() { poly.pop(); renderAreas(); onProgress?.(poly.length); },
+    finishPoly() { if (poly.length < 3) return false; const d = poly.map(q => ({ ...q })); poly = []; renderAreas(); onDrawn?.(d); return true; },
+    /** édition d'une forme : glisser un coin, un milieu de côté (ajoute un coin) ou l'intérieur (déplace) ; cb(points) après chaque geste */
+    setEditArea(p, cb) { edit = p ? { pts: p.map(q => ({ ...q })), onChange: cb } : null; drag = null; container.classList.toggle('pv-editing', !!edit); if (W > 1) renderAreas(); },
     focusArea(pts) { if (!pts?.length || W <= 1) return; const b = bbox(pts); focus(b.x + b.w / 2, b.y + b.h / 2, Math.min(6, Math.max(1, 0.45 / Math.max(b.w, b.h, 0.01)))); },
     fit, focus,
     destroy() { ro.disconnect(); },
   };
+  return api;
 }
 
 /** Rend une image du plan avec les épingles (pour le PDF). Retourne un dataURL JPEG. */

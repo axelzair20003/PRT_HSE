@@ -59,6 +59,17 @@ Les téléphones qui avaient déjà l'app **gardent** leur plan et leurs audits 
 
 ⚠️ Un fichier supprimé d'un dépôt GitHub public reste visible dans son **historique**. Pour effacer complètement l'ancien plan : supprimer le dépôt, le recréer **avec le même nom**, y envoyer ce zip, puis réactiver GitHub Pages. L'adresse de l'app ne change pas et les données des téléphones sont conservées.
 
+## Nouveautés v3.14
+- L'app s'appelle **Audit HSE** (nouvelle icône) ; l'administrateur peut changer le **nom et le logo** (Réglages → Apparence de l'app), pour toute l'équipe.
+- Téléphone : 4 onglets (Accueil, Audits, Plan, Actions). Dans « Audits », en haut à droite : **Pilotage** et **Excel** (un toucher). Sur PC, Pilotage reste dans la barre latérale.
+- **Excel données (Power BI)** : feuilles « Audits » (une ligne par audit, scores par thème en colonnes), « Criteres » (une ligne par critère noté) et « Actions » — tableaux simples, dates et scores en vrais nombres.
+- **Recherche d'entreprise** au-dessus de chaque liste à choisir.
+
+## Nouveautés v3.13
+- **Zones** : tracer un rectangle ou une **forme libre** (on touche les coins), puis **modifier la forme** (glisser un coin, ajouter un coin, déplacer toute la zone) ; même chose pour les zones du plan (Plan → Zones).
+- Nouvel audit : zones du plan discrètes, masquées pendant le tracé, seule la zone choisie reste affichée ; « garder la zone sur le plan » décoché par défaut.
+- **Mettre à jour l'image d'un plan** (Projet → Plans → bouton ⬆) : audits, épingles et zones restent en place.
+
 ## Nouveautés v3.12
 - **iPhone plus léger** : écran du thème compact (Constat · Photo · Action sur une ligne ; la case de constat ne s'ouvre que si besoin ou pour une note de 0 à 2), liste des thèmes sans les boutons N/A, filtres de la liste derrière un bouton « Filtres », accueil allégé (rappel sur une ligne, 3 actions en retard), noms des petites zones masqués sur le plan tant qu'on n'a pas zoomé.
 
