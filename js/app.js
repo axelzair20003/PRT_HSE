@@ -10,7 +10,7 @@ import { SEED_SUBS, SEED_LOCATIONS, SEED_PLAN, SEED_SITE, SEED_PROJECT, loadSeed
 import { CRIT_FR, THEME_FR, TXT as RTXT } from './report-fr.js';
 import { REPORT_DEFAULTS, REPORT_TITLES, buildXLSX, buildPDF, shareFile, download, canShareFile, actionRef } from './export.js';
 
-export const APP_VERSION = '3.14.0';
+export const APP_VERSION = '3.14.1';
 
 // ---------- utilitaires ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -1337,6 +1337,13 @@ async function exportPowerBI() {
   const who = i => i.inspectors || '';
   const crName = ref => criterionOfRef(ref)?.name || ref;
   // 1) Audits : tout l'audit sur une seule ligne (+ une colonne par thème)
+  // visite lisible : « 19/11 · Zone B · n°1 » (audits faits ensemble lors d'un même passage)
+  const visitLbl = {}, visitN = {};
+  for (const i of insps) {
+    if (!i.visitId || visitLbl[i.visitId]) continue;
+    const base = `${i.date.slice(8, 10)}/${i.date.slice(5, 7)} · ${i.zone || 'Sans zone'}`;
+    visitN[base] = (visitN[base] || 0) + 1; visitLbl[i.visitId] = `${base} · n°${visitN[base]}`;
+  }
   const auditRows = [];
   for (const i of insps) {
     const o = overallScore(i.scores, i.bonus, i.penalty), st = auditState(i), ids = namedSubs(i, subs);
@@ -1344,7 +1351,7 @@ async function exportPowerBI() {
     const row = {
       audit_id: i.id, date: D(i.date), annee: +i.date.slice(0, 4), mois: i.date.slice(0, 7), semaine: week(i.date),
       projet: projName(i), plan: plans.find(p => p.id === i.planId)?.name || '', zone: i.zone || '',
-      groupe_zone_id: i.visitId || '', type_audit: ids.length ? 'Entreprise' : 'Zone',
+      visite: visitLbl[i.visitId] || '', type_audit: ids.length ? 'Entreprise' : 'Zone',
       entreprise: ids.map(id => subs[id].name).join(', '), type_entreprise: ids.length === 1 ? typeOf(subs[ids[0]]).label : '',
       hse: who(i), statut: ST_TAG[st.st], criteres_notes: st.n, criteres_total: 124,
       score_global: r3(o.pct), bonus: +i.bonus || 0, penalite: +i.penalty || 0,
@@ -1385,7 +1392,7 @@ async function exportPowerBI() {
     if (rows.length) ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: rows.length, c: keys.length - 1 } }) };
     XLSX.utils.book_append_sheet(wb, ws, name);
   };
-  add(auditRows, 'Audits', { entreprise: 22, hse: 18, projet: 14, zone: 16, reference: 26 });
+  add(auditRows, 'Audits', { visite: 26, entreprise: 22, hse: 18, projet: 14, zone: 16, reference: 26 });
   add(critRows, 'Criteres', { theme: 30, critere: 40, commentaire: 40, entreprise: 22 });
   if (actRows.length) add(actRows, 'Actions', { constat: 40, action_corrective: 40, critere: 34, entreprise: 22 });
   const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array', cellDates: true, compression: true });
