@@ -10,7 +10,7 @@ import { SEED_SUBS, SEED_LOCATIONS, SEED_PLAN, SEED_SITE, SEED_PROJECT, loadSeed
 import { CRIT_FR, THEME_FR, TXT as RTXT } from './report-fr.js';
 import { REPORT_DEFAULTS, REPORT_TITLES, buildXLSX, buildPDF, shareFile, download, canShareFile, actionRef } from './export.js';
 
-export const APP_VERSION = '3.11.0';
+export const APP_VERSION = '3.12.0';
 
 // ---------- utilitaires ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -375,7 +375,7 @@ async function addPhotos(fileList) {
 async function vHome() {
   setTop({ title: PROJECT?.name || 'Inspections HSE', sub: 'Inspections HSE · changer de projet', onTitle: projectSheet, actions: [{ icon: 'gear', aria: 'Réglages', onClick: () => location.hash = '#/settings' }] });
   const [{ subs, subList }, insps, acts] = await Promise.all([maps(), pAll('inspections'), pAll('actions')]);
-  const recent = [...insps].sort((a, b) => (b.date + b.updatedAt).localeCompare(a.date + a.updatedAt)).slice(0, 6);
+  const recent = [...insps].sort((a, b) => (b.date + b.updatedAt).localeCompare(a.date + a.updatedAt)).slice(0, 4);
   const late = acts.filter(isLate).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
   const today = new Date().toLocaleDateString('fr-BE', { weekday: 'long', day: 'numeric', month: 'long' });
   // bandeau de tête (écran large) : projet, photo du chantier, chiffres clés
@@ -407,8 +407,8 @@ async function vHome() {
     ${cloud.can('audit') ? (subList.some(s => !s.archived) ? subGrid(subList, insps, acts) : noCompanyCard()) : '<div class="card muted">Votre accès ne permet pas de lancer des audits. Contactez l’administrateur HSE.</div>'}
     </div><div class="home-side">
     ${late.length ? `<div class="section-head late"><span class="row" style="gap:6px">${ic('alert', 18)} Actions en retard</span><span>${late.length}</span></div>
-      ${late.slice(0, 5).map(a => actionCard(a, subs)).join('')}
-      ${late.length > 5 ? `<a class="btn block" href="#/actions?late=1">Voir les ${late.length} actions</a>` : ''}` : ''}
+      ${late.slice(0, 3).map(a => actionCard(a, subs)).join('')}
+      ${late.length > 3 ? `<a class="btn block" href="#/actions?late=1">Voir les ${late.length} actions en retard</a>` : ''}` : ''}
     <div class="section-head"><span>${cloud.enabled && cloud.isAdmin() ? 'Audits de l’équipe' : cloud.enabled ? 'Mes audits' : 'Inspections récentes'}</span>${insps.length ? `<span class="muted small">${insps.length} au total</span>` : ''}</div>
     ${inspList(recent, subs) || '<div class="empty">Aucune inspection pour l’instant.<br>Touchez une entreprise pour commencer.</div>'}
     </div></div>`;
@@ -479,8 +479,10 @@ function auditLabel(i, subs) {
   if (!n.length) return i.zone ? `Zone · ${i.zone}` : 'Audit de zone';
   return n.length <= 2 ? n.join(' + ') : `${n[0]} + ${n.length - 1} autres`;
 }
-const auditColor = (i, subs) => { const ids = subIdsOf(i); return ids.length === 1 ? (subs[ids[0]]?.color || '#9E9E9E') : '#0B2D5B'; };
-const auditAbbr = (i, subs) => { const ids = subIdsOf(i); return ids.length === 1 ? abbr(subs[ids[0]]?.name) : ids.length ? '×' + ids.length : 'ZON'; };
+// une entreprise supprimée ou sans nom ne compte pas : l'audit redevient un audit de zone (pastille « ZON »)
+const namedSubs = (i, subs) => subIdsOf(i).filter(id => subs[id]?.name);
+const auditColor = (i, subs) => { const ids = namedSubs(i, subs); return ids.length === 1 ? (subs[ids[0]].color || '#9E9E9E') : '#0B2D5B'; };
+const auditAbbr = (i, subs) => { const ids = namedSubs(i, subs); return ids.length === 1 ? abbr(subs[ids[0]].name) : ids.length ? '×' + ids.length : 'ZON'; };
 
 // ---------- démarrage d'un audit ----------
 /** Dernier audit noté de la même entreprise (avant celui-ci) — sert de repère, jamais recopié */
@@ -635,7 +637,7 @@ async function addCompaniesToVisit(insp, siblings, subs) {
   const { subList } = await maps();
   const already = new Set(siblings.flatMap(subIdsOf).concat(subIdsOf(insp)));
   const list = subList.filter(s => !s.archived && !already.has(s.id)).sort((a, b) => a.name.localeCompare(b.name));
-  if (!list.length) return toast('Toutes les entreprises du projet sont déjà dans cette tournée');
+  if (!list.length) return toast('Toutes les entreprises du projet sont déjà dans cet audit de zone');
   const chosen = new Set();
   openSheet(`<h3>Entreprises dans ${esc(insp.zone || 'cette zone')}</h3><p class="muted small" style="margin-top:-4px">Un audit et un score par entreprise.</p>
     <div class="pick-grid">${list.map(s => `<button type="button" class="pick" data-s="${s.id}" style="--c:${esc(s.color)}"><span class="mono xs">${esc(abbr(s.name))}</span><span class="grow">${esc(s.name)}</span>${ic('check', 16)}</button>`).join('')}</div>
@@ -657,7 +659,7 @@ async function addCompaniesToVisit(insp, siblings, subs) {
         if (insp.planId && ni.planId !== insp.planId) { ni.planId = insp.planId; await db.put('inspections', ni); }
         first ||= ni;
       }
-      close(); toast(chosen.size > 1 ? `${chosen.size} audits ajoutés à la tournée` : 'Audit ajouté à la tournée');
+      close(); toast(chosen.size > 1 ? `${chosen.size} entreprises ajoutées` : 'Entreprise ajoutée');
       location.hash = '#/insp/' + first.id;
     };
   });
@@ -759,7 +761,7 @@ function auditRow(i, subs, { meta = true } = {}) {
   const { o, n, st } = auditState(i);
   const who = cloud.enabled && cloud.isAdmin() && i.owner !== cloud.uid() && i.inspectors ? ` · ${esc(i.inspectors)}` : '';
   return `<a class="vg-row" href="#/insp/${i.id}" style="--c:${esc(auditColor(i, subs))}"><span class="mono">${esc(auditAbbr(i, subs))}</span>
-    <span class="grow"><b>${esc(auditLabel(i, subs))}</b><small>${stTag(st, n)}${isLocked(i) ? ' <span class="st-tag s-lock">Transmis</span>' : ''}${meta ? ` ${dateFR(i.date)}${i.zone && subIdsOf(i).length ? ' · ' + esc(i.zone) : ''}${who}` : ''}</small></span>${o.pct === null ? '<span class="badge none">—</span>' : badge(o.pct)}</a>`;
+    <span class="grow"><b>${esc(auditLabel(i, subs))}</b><small>${stTag(st, n)}${isLocked(i) ? ' <span class="st-tag s-lock">Transmis</span>' : ''}${meta ? ` ${dateFR(i.date)}${i.zone && namedSubs(i, subs).length ? ' · ' + esc(i.zone) : ''}${who}` : ''}</small></span>${o.pct === null ? '<span class="badge none">—</span>' : badge(o.pct)}</a>`;
 }
 function inspCard(i, subs) { return `<div class="card visit-group single" style="--c:${esc(auditColor(i, subs))}">${auditRow(i, subs)}</div>`; }
 // ---------- choix de la zone : liste propre, triée, regroupée par secteur ----------
@@ -815,13 +817,13 @@ function inspList(list, subs) {
     if (!grp) return inspCard(i, subs);
     if (done.has(i.visitId)) return '';
     done.add(i.visitId);
-    const zAudit = grp.find(x => !subIdsOf(x).length);
+    const zAudit = grp.find(x => !namedSubs(x, subs).length);
     const comps = grp.filter(x => x !== zAudit).sort((a, b) => auditLabel(a, subs).localeCompare(auditLabel(b, subs)));
     const zone = grp.find(x => x.zone)?.zone;
-    const nC = new Set(comps.flatMap(subIdsOf)).size;
+    const nC = new Set(comps.flatMap(x => namedSubs(x, subs))).size;
     const who = cloud.enabled && cloud.isAdmin() && i.owner !== cloud.uid() && i.inspectors ? ' · ' + esc(i.inspectors) : '';
     const zs = zAudit ? auditState(zAudit) : null;
-    const head = `${ic('pin', 18)}<span class="grow"><b>${esc(zone || 'Tournée')}</b><small>Tournée · ${dateFR(i.date)} · ${nC} entreprise${nC > 1 ? 's' : ''}${who}${zs ? ' · zone ' + ST_TAG[zs.st].toLowerCase() : ''}</small></span>${zs ? (zs.o.pct === null ? '<span class="badge none">—</span>' : badge(zs.o.pct)) : ''}`;
+    const head = `${ic('pin', 18)}<span class="grow"><b>${esc(zone || 'Audit de zone')}</b><small>${dateFR(i.date)} · ${nC} entreprise${nC > 1 ? 's' : ''}${who}${zs ? ' · ' + { draft: 'zone non notée', wip: 'zone en cours', done: 'zone terminée' }[zs.st] : ''}</small></span>${zs ? (zs.o.pct === null ? '<span class="badge none">—</span>' : badge(zs.o.pct)) : ''}`;
     return `<div class="card visit-group">${zAudit ? `<a class="vg-head" href="#/insp/${zAudit.id}">${head}</a>` : `<div class="vg-head">${head}</div>`}${comps.map(x => auditRow(x, subs, { meta: false })).join('')}</div>`;
   }).join('');
 }
@@ -971,15 +973,15 @@ async function vInsp(id) {
     { icon: 'trash', aria: 'Supprimer l’audit', onClick: async () => { if (await confirmDeleteInspection(id, sub?.name)) location.replace('#/'); } },
     { icon: 'edit', aria: 'Modifier', onClick: () => location.hash = `#/insp/${id}/edit` }] });
   const siblings = insp.visitId ? (await pAll('inspections')).filter(i => i.visitId === insp.visitId).sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '')) : [];
-  const visitBar = siblings.length > 1 ? `<div class="visit-bar"><span class="muted small">Tournée · ${siblings.length} audits</span><div class="visit-chips">${siblings.map(v => {
+  const visitBar = siblings.length > 1 ? `<div class="visit-bar"><span class="muted small">Audit de zone · ${siblings.length} audits</span><div class="visit-chips">${siblings.map(v => {
     const vo = overallScore(v.scores, v.bonus, v.penalty), vs = subs[v.subId];
-    const vz = !subIdsOf(v).length;
+    const vz = !namedSubs(v, subs).length;
     return `<a href="#/insp/${v.id}" class="vchip ${v.id === id ? 'on' : ''}" style="--c:${esc(vz ? '#0B2D5B' : (vs?.color || '#9E9E9E'))}"><span class="mono xs">${vz ? 'ZON' : esc(abbr(vs?.name))}</span>${esc(vz ? (v.zone || 'Zone') : (vs?.name || ''))}<em>${vo.pct === null ? '—' : Math.round(vo.pct * 100) + '%'}</em></a>`;
   }).join('')}${cloud.can('audit') ? `<button type="button" class="vchip vadd" id="v-add">${ic('plus', 16)} Entreprise</button>` : ''}</div></div>` : '';
   const isZone = subIdsOf(insp).length === 0;
   // audit de zone (seul) : on peut y ajouter les entreprises rencontrées
   const zoneAdd = isZone && siblings.length <= 1 && cloud.can('audit') ? `<button type="button" class="card link row zone-add" id="v-add">
-      <span class="ic-round">${ic('plus')}</span><span class="grow"><b>Auditer une entreprise dans cette zone</b><span class="muted small">Une ou plusieurs — un audit et un score par entreprise, dans la même tournée</span></span>${ic('chevron')}</button>` : '';
+      <span class="ic-round">${ic('plus')}</span><span class="grow"><b>Auditer une entreprise dans cette zone</b><span class="muted small">Une ou plusieurs — un audit et un score par entreprise, regroupés avec cette zone</span></span>${ic('chevron')}</button>` : '';
   const teamActs = subIdsOf(insp).length === 1 ? await teamOpenActions(insp.subId) : [];
   const prev = await lastAudit(insp);
   const prevPct = prev ? overallScore(prev.scores, prev.bonus, prev.penalty).pct : null;
@@ -1011,8 +1013,7 @@ async function vInsp(id) {
           <a class="grow row" href="#/insp/${id}/t/${t.theme.ref}">
             <span class="num">${t.theme.ref.replace('.0', '')}</span>
             <span class="grow"><b>${esc(t.theme.name)}</b><span class="muted small">${allNA ? 'Non applicable' : `${t.done} / ${t.total}`}</span></span>
-            ${allNA ? '<span class="badge none">N/A</span>' : t.done ? badge(t.pct) : '<span class="badge none">—</span>'}</a>
-          <button class="na-btn ${allNA ? 'on' : ''}" data-na="${t.theme.ref}" aria-label="Thème non applicable">N/A</button></div>`;
+            ${allNA ? '<span class="badge none">N/A</span>' : t.done ? badge(t.pct) : '<span class="badge none">—</span>'}${ic('chevron', 18)}</a></div>`;
       }).join('')}
       <div class="section-head"><span>Bonnes pratiques</span><span class="muted small">${(insp.goods || []).length || ''}</span></div>
       ${(insp.goods || []).map(goodCard).join('')}
@@ -1076,10 +1077,11 @@ async function vTheme(id, ref) {
         <h3><small>${c.ref}</small>${esc(c.name)}</h3>
         ${prevNote(c)}
         <div class="scores">${[0, 1, 2, 3, 4, 5, NA].map(v => `<button type="button" data-v="${v}" class="${v === NA ? 'na' : ''} ${s.v === v ? 'on' : ''}">${v === NA ? 'N/A' : v}</button>`).join('')}</div>
-        <textarea class="in" style="margin-top:8px;min-height:60px" placeholder="Constat / commentaire" data-c>${esc(s.c || '')}</textarea>
-        <div class="crit-tools">
-          <label class="btn" style="margin:0">${ic('camera')} Photo<input type="file" accept="image/*" capture="environment" class="hidden-input" data-photo-in multiple></label>
-          ${cloud.can('actions') ? `<button class="btn" data-act>${ic('plus')} Action${n ? ` (${n})` : ''}</button>` : '<span></span>'}</div>
+        <div class="crit-tools3">
+          <button type="button" class="tbtn ${s.c ? 'on' : ''}" data-cbtn>${ic('edit', 17)}<span>Constat</span></button>
+          <label class="tbtn">${ic('camera', 17)}<span>Photo</span><input type="file" accept="image/*" capture="environment" class="hidden-input" data-photo-in multiple></label>
+          ${cloud.can('actions') ? `<button type="button" class="tbtn ${n ? 'on' : ''}" data-act>${ic('plus', 17)}<span>Action${n ? ` (${n})` : ''}</span></button>` : ''}</div>
+        <textarea class="in crit-c" placeholder="Constat / commentaire" data-c ${s.c || (typeof s.v === 'number' && s.v <= 2) ? '' : 'hidden'}>${esc(s.c || '')}</textarea>
         <div class="thumbs" data-thumbs></div><div class="good-slot" data-gs></div></div>`;
     }).join('')}
     <p class="muted small swipe-hint">Glissez à gauche ou à droite pour changer de thème</p>
@@ -1100,7 +1102,7 @@ async function vTheme(id, ref) {
   const drawGood = card => {
     const ref = card.dataset.ref, g = (insp.goods || []).find(x => x.critRef === ref), v = insp.scores[ref]?.v;
     card.querySelector('[data-gs]').innerHTML = g ? `<button type="button" class="good-chip" data-goodedit>${ic('check', 16)} Bonne pratique : ${esc(g.text || 'voir')}</button>`
-      : v === 5 ? `<button type="button" class="good-link" data-goodnew>${ic('plus', 16)} Noter comme bonne pratique</button>` : '';
+      : v === 5 ? `<button type="button" class="good-link sm" data-goodnew>${ic('plus', 15)} Bonne pratique</button>` : '';
   };
   drawScore();
   view.querySelectorAll('.crit').forEach(c => { drawThumbs(c); drawGood(c); });
@@ -1125,6 +1127,8 @@ async function vTheme(id, ref) {
       card.querySelectorAll('[data-v]').forEach(b => b.classList.toggle('on', b === vb && s.v !== null));
       navigator.vibrate?.(15);
       save.flush(); drawScore(); drawGood(card);
+      // note 0 à 2 : la case « constat » s'ouvre d'elle-même
+      if (typeof s.v === 'number' && s.v <= 2) card.querySelector('[data-c]').hidden = false;
       // passage automatique au critère suivant
       if (s.v !== null && !(typeof s.v === 'number' && s.v <= 2)) {
         const next = card.nextElementSibling;
@@ -1140,6 +1144,7 @@ async function vTheme(id, ref) {
       }
       return;
     }
+    if (e.target.closest('[data-cbtn]')) { const t = card.querySelector('[data-c]'); t.hidden = false; t.focus(); return; }
     if (e.target.closest('[data-goodnew], [data-goodedit]')) {
       save.flush();
       await goodSheet(insp, { critRef: cref, good: (insp.goods || []).find(x => x.critRef === cref) || null });
@@ -1172,6 +1177,7 @@ async function vTheme(id, ref) {
   view.addEventListener('input', e => {
     if (!e.target.matches('[data-c]')) return;
     sc(e.target.closest('.crit').dataset.ref).c = e.target.value; save();
+    e.target.closest('.crit').querySelector('[data-cbtn]')?.classList.toggle('on', !!e.target.value.trim());
   });
   view.addEventListener('change', async e => {
     if (!e.target.matches('[data-photo-in]')) return;
@@ -1803,17 +1809,20 @@ async function vAudits(q) {
   const sel = (id, all, opts, v) => `<select class="in f-sel ${v ? 'set' : ''}" id="${id}"><option value="">${all}</option>${opts.map(([k, l]) => `<option value="${esc(k)}" ${k === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
   view.innerHTML = `
     ${auditTabs('date')}
-    <div class="a-search">${ic('search', 18)}<input class="in" id="a-q" type="search" placeholder="Entreprise, zone, référence…" value="${esc(auditF.q)}" autocomplete="off"></div>
-    <div class="a-filters">
+    <div class="a-top"><div class="a-search">${ic('search', 18)}<input class="in" id="a-q" type="search" placeholder="Entreprise, zone, référence…" value="${esc(auditF.q)}" autocomplete="off"></div>
+      <button type="button" class="btn a-fbtn ${auditF.sub || auditF.hse ? 'set' : ''}" id="a-fbtn" aria-expanded="false">${ic('filter', 18)}<span>Filtres${(auditF.sub ? 1 : 0) + (auditF.hse ? 1 : 0) ? ` (${(auditF.sub ? 1 : 0) + (auditF.hse ? 1 : 0)})` : ''}</span></button></div>
+    <div class="a-filters" id="a-filters" ${auditF.sub || auditF.hse ? '' : 'hidden'}>
       ${sel('a-sub', 'Entreprises', active.map(s => [s.id, s.name]), auditF.sub)}
       ${people.length > 1 || auditF.hse ? sel('a-hse', 'Tous les HSE', people.map(p => [p.k, p.n]), auditF.hse) : ''}
     </div>
     <div class="seg a-st" id="a-st"></div>
     <div id="alist"></div>`;
   draw();
+  $('#a-fbtn').onclick = () => { const f = $('#a-filters'); f.hidden = !f.hidden; $('#a-fbtn').setAttribute('aria-expanded', String(!f.hidden)); };
+  const fcount = () => { const n = (auditF.sub ? 1 : 0) + (auditF.hse ? 1 : 0); $('#a-fbtn span').textContent = n ? `Filtres (${n})` : 'Filtres'; $('#a-fbtn').classList.toggle('set', !!n); };
   let qt; $('#a-q').addEventListener('input', e => { clearTimeout(qt); qt = setTimeout(() => { auditF.q = e.target.value; draw(); }, 200); });
-  $('#a-sub').onchange = e => { auditF.sub = e.target.value; e.target.classList.toggle('set', !!e.target.value); draw(); };
-  $('#a-hse') && ($('#a-hse').onchange = e => { auditF.hse = e.target.value; e.target.classList.toggle('set', !!e.target.value); draw(); });
+  $('#a-sub').onchange = e => { auditF.sub = e.target.value; e.target.classList.toggle('set', !!e.target.value); fcount(); draw(); };
+  $('#a-hse') && ($('#a-hse').onchange = e => { auditF.hse = e.target.value; e.target.classList.toggle('set', !!e.target.value); fcount(); draw(); });
   view.addEventListener('click', async e => {
     const st = e.target.closest('[data-st]'); if (st) { auditF.st = st.dataset.st; draw(); return; }
     const go = e.target.closest('[data-st-go]'); if (go) { auditF.st = go.dataset.stGo; draw(); window.scrollTo(0, 0); return; }

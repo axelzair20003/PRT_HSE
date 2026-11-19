@@ -880,3 +880,31 @@ a.vg-head:active { background: #E8EEF8; }
 .upd-bar .btn { background: #F5C400; color: #0B2D5B; border: 0; min-height: 44px; }
 @media (min-width: 1024px) { .upd-bar { left: auto; right: 24px; bottom: 24px; width: 420px; } }
 .upd-bar .btn { white-space: nowrap; flex: none; }
+
+/* ---- v3.12 : écrans iPhone allégés ---- */
+.crit-tools3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 8px; }
+.tbtn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 42px; padding: 0 6px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); font: inherit; font-size: 14.5px; font-weight: 700; cursor: pointer; position: relative; }
+.tbtn .ic { color: var(--muted); flex: none; }
+.tbtn.on { border-color: var(--brand-2); color: var(--brand-2); background: color-mix(in srgb, var(--brand-2) 8%, var(--surface)); }
+.tbtn.on .ic { color: var(--brand-2); }
+.crit-c { margin-top: 8px; min-height: 64px; }
+.crit .prev-note { margin: -4px 0 8px; }
+.crit h3 { margin-bottom: 8px; }
+.good-link.sm { min-height: 40px; margin-top: 8px; width: auto; padding: 0 14px; font-size: 14.5px; display: inline-flex; }
+.theme-row a > .ic { color: var(--muted); flex: none; margin-left: 2px; }
+.pv-alabel.pv-hide { visibility: hidden; }
+.a-top { display: flex; gap: 8px; margin-bottom: 8px; align-items: stretch; }
+.a-top .a-search { flex: 1; margin: 0; }
+.a-fbtn { flex: none; margin: 0; padding: 0 14px; gap: 6px; font-size: 14.5px; }
+.a-fbtn.set { border-color: var(--brand); background: #E8EEF8; color: #0B2D5B; }
+:root[data-theme="dark"] .a-fbtn.set { background: #1D2B45; color: #CFE0FF; }
+/* rappel compact sur téléphone : une seule ligne (icône · titre · bouton · ×) */
+@media (max-width: 600px) {
+  .notice { grid-template-columns: auto 1fr auto auto; padding: 10px 8px 10px 12px; gap: 8px; }
+  .notice .muted { display: none; }
+  .notice b { font-size: 15px; line-height: 1.25; }
+  .notice > .small-btn { grid-column: 3; grid-row: 1; min-height: 40px; font-size: 14px; padding: 0 12px; }
+  .notice > .notice-x { grid-column: 4; width: 36px; }
+  .notice-ic { width: 32px; height: 32px; }
+}
+[hidden] { display: none !important; }

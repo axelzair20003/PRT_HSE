@@ -59,6 +59,9 @@ Les téléphones qui avaient déjà l'app **gardent** leur plan et leurs audits 
 
 ⚠️ Un fichier supprimé d'un dépôt GitHub public reste visible dans son **historique**. Pour effacer complètement l'ancien plan : supprimer le dépôt, le recréer **avec le même nom**, y envoyer ce zip, puis réactiver GitHub Pages. L'adresse de l'app ne change pas et les données des téléphones sont conservées.
 
+## Nouveautés v3.12
+- **iPhone plus léger** : écran du thème compact (Constat · Photo · Action sur une ligne ; la case de constat ne s'ouvre que si besoin ou pour une note de 0 à 2), liste des thèmes sans les boutons N/A, filtres de la liste derrière un bouton « Filtres », accueil allégé (rappel sur une ligne, 3 actions en retard), noms des petites zones masqués sur le plan tant qu'on n'a pas zoomé.
+
 ## Nouveautés v3.11
 - **Confidentialité** : plan, entreprises et zones retirés du dépôt public ; l'app démarre vide et neutre.
 - **Mise à jour en un toucher** : bandeau « Nouvelle version disponible → Mettre à jour » (plus besoin de rouvrir 2 fois).

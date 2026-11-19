@@ -34,6 +34,11 @@ export function createPlanViewer(container, opts) {
   const layer = container.querySelector('.pv-pins');
   const svg = container.querySelector('.pv-areas'), alabels = container.querySelector('.pv-alabels');
   const NS = 'http://www.w3.org/2000/svg';
+  // un nom de zone n'apparaît que si la zone est assez large à l'écran (sinon les noms se chevauchent)
+  const fitLabels = () => alabels.querySelectorAll('.pv-alabel').forEach(el => {
+    if (el.classList.contains('k-sel')) return;
+    el.classList.toggle('pv-hide', +el.dataset.aw * s < Math.min(80, el.offsetWidth * 0.6 + 24));
+  });
   const renderAreas = () => {
     svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.style.width = W + 'px'; svg.style.height = H + 'px';
     svg.innerHTML = ''; alabels.innerHTML = '';
@@ -49,9 +54,11 @@ export function createPlanViewer(container, opts) {
         const c = centroid(a.pts), el = document.createElement('span');
         el.className = 'pv-alabel k-' + (a.kind || 'zone'); el.textContent = a.label;
         el.style.left = c.x * W + 'px'; el.style.top = c.y * H + 'px'; el.style.setProperty('--c', a.color || '#1A56A8');
+        el.dataset.aw = (Math.max(...a.pts.map(p => p.x)) - Math.min(...a.pts.map(p => p.x))) * W; // largeur de la zone (px image)
         alabels.appendChild(el);
       }
     }
+    fitLabels();
   };
   // zone du plan sous le doigt (la plus petite si plusieurs se chevauchent)
   const zoneAt = (x, y) => areas.filter(a => (a.kind === 'zone' || a.tap) && a.pts?.length > 2 && inside(a.pts, x, y)).sort((a, b) => polyArea(a.pts) - polyArea(b.pts))[0] || null;
@@ -68,6 +75,7 @@ export function createPlanViewer(container, opts) {
     clampView();
     stage.style.transform = `translate(${tx}px,${ty}px) scale(${s})`;
     stage.style.setProperty('--inv', 1 / s);
+    fitLabels();
     if (opts.cluster && W > 1) { const b = Math.round(Math.log(s) / Math.log(1.3)); if (b !== lastBucket) { lastBucket = b; renderPins(); } }
   };
   // cover = le plan remplit tout l'écran (on se déplace au doigt) ; sinon il est entièrement visible
