@@ -7,10 +7,10 @@ import { compressImage, planFileToBlob, pdfPageCount } from './images.js';
 import { ic } from './icons.js';
 import * as cloud from './cloud.js';
 import { SEED_SUBS, SEED_LOCATIONS, SEED_PLAN, SEED_SITE, SEED_PROJECT, loadSeed } from './seed.js';
-import { CRIT_FR, THEME_FR, TXT as RTXT } from './report-fr.js';
+import { CRIT_FR, THEME_FR, TXT as RTXT, RATING_FR, RANGE_FR } from './report-fr.js';
 import { REPORT_DEFAULTS, REPORT_TITLES, buildXLSX, buildPDF, shareFile, download, canShareFile, actionRef } from './export.js';
 
-export const APP_VERSION = '3.14.1';
+export const APP_VERSION = '3.15.0';
 
 // ---------- utilitaires ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -93,14 +93,15 @@ function showScale() {
   openSheet(`<h3>Barème de notation</h3>
     ${SCALE.map(s => `<div class="scale-row"><b>${s.v}</b><div>${esc(s.fr)}<div class="muted small">${esc(s.en)}</div></div></div>`).join('')}
     <div class="scale-row"><b style="font-size:16px">N/A</b><div>Non applicable — exclu du total et du maximum</div></div>
-    <h3 style="margin-top:16px">Rating</h3>
-    ${RATINGS.map(r => `<div class="row" style="margin:6px 0"><span class="badge" style="background:${r.color};color:${r.fg};min-width:130px">${r.name}</span><span>${esc(r.range)}</span></div>`).join('')}
+    <h3 style="margin-top:16px">Appréciation</h3>
+    ${RATINGS.map(r => `<div class="row" style="margin:6px 0"><span class="badge" style="background:${r.color};color:${r.fg};min-width:130px">${rName(r)}</span><span>${esc(RANGE_FR[r.name] || r.range)}</span></div>`).join('')}
     <p class="muted small">Un thème entièrement N/A est exclu de la moyenne globale. Overall = moyenne des thèmes notés + Bonus/100 − Pénalité/100, borné 0–100 %.</p>
     <button class="btn block primary" data-close>Fermer</button>`);
 }
 
 const badge = pct => { const r = rating(pct); return `<span class="badge" style="background:${r.color};color:${r.fg}">${pct === null ? 'N/A' : Math.round(pct * 100) + '%'}</span>`; };
-const ratingChip = pct => { const r = rating(pct); return `<span class="chip" style="background:${r.color};color:${r.fg}">${r.name}</span>`; };
+const rName = r => RATING_FR[r.name] || r.name; // libellé affiché dans l'app (le PDF anglais garde l'anglais)
+const ratingChip = pct => { const r = rating(pct); return `<span class="chip" style="background:${r.color};color:${r.fg}">${rName(r)}</span>`; };
 /** Texte lisible sur une couleur d'entreprise : foncé sur les couleurs claires (jaune, orange clair…), blanc sinon */
 const inkOn = hex => {
   const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '').trim()); if (!m) return '#fff';
@@ -413,6 +414,20 @@ async function addPhotos(fileList) {
 // ÉCRANS
 // =====================================================================
 
+/** « Reprendre l'audit » : le dernier audit ouvert sur ce téléphone depuis moins de 12 h, s'il n'est pas terminé */
+async function resumeCard(subs) {
+  const last = await db.getMeta('lastInsp').catch(() => null);
+  if (!last?.id || Date.now() - last.at > 12 * 3600e3) return '';
+  const i = await db.get('inspections', last.id);
+  if (!i || i.deleted || isLocked(i)) return '';
+  const { n, st } = auditState(i);
+  if (st === 'done') return '';
+  const zoneTxt = i.zone ? `Zone ${esc(i.zone)}` : '';
+  const what = subIdsOf(i).length ? esc(auditLabel(i, subs)) : (zoneTxt || 'Audit de zone');
+  const meta = [subIdsOf(i).length ? zoneTxt : '', `${n}/124`].filter(Boolean).join(' · ');
+  const th = last.ref && THEMES.find(t => t.ref === last.ref);
+  return `<a class="resume-card" href="#/insp/${i.id}${th ? '/t/' + th.ref : ''}">${ic('clock', 22)}<span><b>Reprendre l’audit en cours</b><small>${what} · ${meta}${th ? ` · thème ${th.ref.split('.')[0]}` : ''}</small></span>${ic('chevron', 20)}</a>`;
+}
 async function vHome() {
   setTop({ title: PROJECT?.name || 'Inspections HSE', sub: 'Inspections HSE · changer de projet', onTitle: projectSheet, actions: [{ icon: 'gear', aria: 'Réglages', onClick: () => location.hash = '#/settings' }] });
   const [{ subs, subList }, insps, acts] = await Promise.all([maps(), pAll('inspections'), pAll('actions')]);
@@ -426,6 +441,7 @@ async function vHome() {
   const avgPct = pcts.length ? pcts.reduce((a, b) => a + b, 0) / pcts.length : null;
   const openActs = acts.filter(a => a.status !== 'Closed').length;
   const notices = await homeNotices(insps.length);
+  const resume = cloud.can('audit') ? await resumeCard(subs) : '';
   view.innerHTML = `
     ${cloud.enabled ? '<button class="sync-pill" id="sync-now" hidden></button>' : ''}
     ${notices}
@@ -442,6 +458,7 @@ async function vHome() {
       </div>
       ${cloud.can('audit') ? `<a class="hero-cta" href="#/start">${ic('plus')} Nouvel audit</a>` : ''}
     </section>
+    ${resume}
     ${cloud.can('audit') ? `<a class="btn primary big new-audit" href="#/start">${ic('plus')}<span>Nouvel audit<small>zone, une ou plusieurs entreprises</small></span></a>` : ''}
     <div class="home-cols"><div class="home-main">
     <div class="section-head"><span>Audit rapide</span><span class="muted small" style="text-transform:capitalize">${esc(today)}</span></div>
@@ -461,6 +478,7 @@ async function vHome() {
     $('#hero-logo').src = BRAND.logo;
   })();
   bindSubGrid();
+  if ($('#kit-in')) $('#kit-in').onchange = e => restoreFile(e.target.files[0], true);
   bindNotices();
   $('#pick-comp')?.addEventListener('click', pickProjectCompanies);
   drawSync();
@@ -471,7 +489,9 @@ async function vHome() {
 function noCompanyCard() {
   return `<div class="card empty-proj"><b>Aucune entreprise dans ${esc(PROJECT?.name || 'ce projet')}</b>
     <p class="muted small">${cloud.isAdmin() ? 'Choisissez dans l’annuaire les entreprises qui travaillent sur ce projet.' : 'L’administrateur HSE doit d’abord ajouter les entreprises de ce projet.'}</p>
-    ${cloud.isAdmin() ? `<button class="btn primary block" id="pick-comp">${ic('plus')} Ajouter des entreprises</button>` : ''}</div>`;
+    ${cloud.isAdmin() ? `<button class="btn primary block" id="pick-comp">${ic('plus')} Ajouter des entreprises</button>` : ''}
+    ${cloud.enabled ? '' : `<label class="btn block" style="margin-top:10px">${ic('upload')} Importer un kit de démarrage<input type="file" accept="application/json,.json" class="hidden-input" id="kit-in"></label>
+    <p class="muted small" style="margin:8px 0 0">Fichier .json reçu de votre responsable HSE : projet, plan et entreprises déjà prêts.</p>`}</div>`;
 }
 async function pickProjectCompanies() {
   const { allSubs } = await maps();
@@ -514,7 +534,7 @@ function bindSubGrid() {
 // ---------- audits : 0, 1 ou plusieurs entreprises ----------
 const subIdsOf = i => Array.isArray(i?.subIds) ? i.subIds : (i?.subId ? [i.subId] : []);
 const hasSub = (i, id) => subIdsOf(i).includes(id);
-/** Libellé d'un audit : « TRBA », « TRBA + VKE », « TRBA + 3 autres » ou « Audit de zone » */
+/** Libellé d'un audit : « Entreprise A », « A + B », « A + 3 autres » ou « Audit de zone » */
 function auditLabel(i, subs) {
   const n = subIdsOf(i).map(id => subs[id]?.name).filter(Boolean);
   if (!n.length) return i.zone ? `Zone · ${i.zone}` : 'Audit de zone';
@@ -562,7 +582,7 @@ async function vStart(subId) {
     <div class="step-head"><span class="step-n">1</span><b>Où ?</b><span class="muted small">Touchez une zone, un point, ou tracez la zone (facultatif)</span></div>
     <div id="spick" class="pv start-map2"></div>
     ${plan ? '<div class="plan-tools" id="s-tools"></div>' : ''}
-    <input class="in" id="s-zone" autocomplete="off" placeholder="Nom de la zone (ex. Roof DCH4, UTI 11…)" style="margin-top:8px">
+    <input class="in" id="s-zone" autocomplete="off" placeholder="Nom de la zone (ex. Bâtiment A, niveau 2…)" style="margin-top:8px">
     <div class="step-head"><span class="step-n">2</span><b>Quelle(s) entreprise(s) ?</b><span class="muted small" id="s-count"></span></div>
     <div class="pick-grid">${active.map(s => `<button type="button" class="pick ${chosen.has(s.id) ? 'on' : ''}" data-s="${s.id}" style="--c:${esc(s.color)}"><span class="mono xs">${esc(abbr(s.name))}</span><span class="grow">${esc(s.name)}</span>${ic('check', 16)}</button>`).join('')}</div>
     <p class="muted small" id="s-note" style="margin:8px 2px 0"></p>
@@ -608,7 +628,7 @@ async function vStart(subId) {
 /**
  * Zone d'un audit sur le plan : toucher une zone du plan, toucher un point, ou tracer un rectangle.
  * state = { pin, area, zone } (area = { name, pts, zoneId? }) ; onChange() après chaque changement.
- * Ahmed peut ajouter la zone tracée aux zones du plan ; les autres HSE la gardent pour leur audit.
+ * l'admin HSE peut ajouter la zone tracée aux zones du plan ; les autres HSE la gardent pour leur audit.
  */
 function zoneKit({ plan, state, nameInput, toolsEl, onChange, color = () => '#F5C400' }) {
   let pv = null;
@@ -648,7 +668,7 @@ function zoneKit({ plan, state, nameInput, toolsEl, onChange, color = () => '#F5
     setMode('');
     const admin = cloud.isAdmin();
     openSheet(`<h3>Nouvelle zone</h3>
-      <label class="f" style="margin-top:0">Nom de la zone</label><input class="in" id="zn" value="${esc(nameInput?.value || state.zone || '')}" placeholder="ex. DCH2 nord, UTI 12…" autocomplete="off">
+      <label class="f" style="margin-top:0">Nom de la zone</label><input class="in" id="zn" value="${esc(nameInput?.value || state.zone || '')}" placeholder="ex. Bâtiment A nord, Zone 3…" autocomplete="off">
       ${admin && plan ? `<label class="row check-line" style="margin-top:12px"><input type="checkbox" id="zsave"><span>Garder cette zone sur le plan pour les prochains audits</span></label>` : ''}
       <div class="btns" style="margin-top:14px"><button class="btn" data-close>Annuler</button><button class="btn primary" id="zok">Valider</button></div>`,
     (el, close) => {
@@ -744,7 +764,7 @@ function goodSheet(insp, { critRef = '', good = null, readOnly = false } = {}) {
       <label class="f" style="margin-top:0">Ce qui a été observé</label>
       <textarea class="in" id="gtext" rows="3" placeholder="ex. Zone de levage parfaitement balisée, signaleur présent" ${readOnly ? 'disabled' : ''}>${esc(g.text)}</textarea>
       <div class="thumbs" id="gthumbs"></div>
-      ${readOnly ? '' : `<div class="btns" style="margin-top:10px"><label class="btn" style="margin:0">${ic('camera')} Photo<input type="file" accept="image/*" capture="environment" class="hidden-input" id="gphoto"></label>
+      ${readOnly ? '' : `<div class="btns" style="margin-top:10px"><label class="btn" style="margin:0">${ic('camera')} Photo<input type="file" accept="image/*" class="hidden-input" id="gphoto"></label>
         ${good ? `<button class="btn danger" id="gdel">${ic('trash', 18)} Supprimer</button>` : '<span></span>'}</div>
       <button class="btn primary big good-btn" id="gok" style="margin-top:4px">Enregistrer la bonne pratique</button>`}`,
     (el, close) => {
@@ -840,7 +860,7 @@ const natural = (a, b) => a.localeCompare(b, 'fr', { numeric: true, sensitivity:
 async function zoneOptions() {
   const used = (await pAll('inspections')).sort((a, b) => (b.date + (b.updatedAt || '')).localeCompare(a.date + (a.updatedAt || ''))).map(i => (i.zone || '').trim()).filter(Boolean);
   const all = new Map();
-  [...used, ...SEED_LOCATIONS].forEach(z => { z = String(z).trim(); if (!z || /^\d+(\.\d+)?$/.test(z)) return; const k = zoneKey(z); if (!all.has(k)) all.set(k, z.charAt(0).toUpperCase() + z.slice(1)); });
+  [...used, ...((await db.getMeta('locations')) || SEED_LOCATIONS)].forEach(z => { z = String(z).trim(); if (!z || /^\d+(\.\d+)?$/.test(z)) return; const k = zoneKey(z); if (!all.has(k)) all.set(k, z.charAt(0).toUpperCase() + z.slice(1)); });
   const recent = [...new Map(used.map(z => [zoneKey(z), z])).values()].slice(0, 6);
   return { list: [...all.values()].sort(natural), recent };
 }
@@ -922,7 +942,7 @@ async function inspForm(state, { live }) {
     <label class="f" style="margin-top:4px">Zone — touchez une zone, un point, ou tracez la zone</label>
     <div id="pick" class="pv plan-box"></div>
     <div class="plan-tools" id="f-tools"></div>
-    <input class="in" id="f-zone" autocomplete="off" placeholder="Zone (ex. Roof DCH4, UTI 11, FSA C…)" value="${esc(state.zone || '')}" style="margin-top:8px">
+    <input class="in" id="f-zone" autocomplete="off" placeholder="Zone (ex. Bâtiment A, niveau 2…)" value="${esc(state.zone || '')}" style="margin-top:8px">
     <label class="f">Entreprise auditée</label>
     <div class="pick-grid" id="f-subs">${subsActive.map(s => `<button type="button" class="pick ${subIdsOf(state).includes(s.id) ? 'on' : ''}" data-s="${s.id}" style="--c:${esc(s.color)}"><span class="mono xs">${esc(abbr(s.name))}</span><span class="grow">${esc(s.name)}</span>${ic('check', 16)}</button>`).join('')}</div>
     ${planList.length > 1 ? `<label class="f">Plan</label><select class="in" id="f-plan">${planList.map(p => `<option value="${p.id}" ${p.id === state.planId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
@@ -1034,6 +1054,7 @@ function lockedView(insp, sub, acts) {
 async function vInsp(id) {
   const insp = await db.get('inspections', id);
   if (!insp || insp.deleted) return vNotFound();
+  db.setMeta('lastInsp', { id, at: Date.now() }).catch(() => {});
   const { subs, plans } = await maps();
   const sub = { name: auditLabel(insp, subs), color: auditColor(insp, subs) };
   const acts = await db.byIndex('actions', 'inspectionId', id);
@@ -1060,7 +1081,7 @@ async function vInsp(id) {
     const next = o.themes.find(t => t.done < t.total);
     view.innerHTML = visitBar + zoneAdd + `
       <div class="card score-card">
-        <div><div class="score-big" style="color:${o.pct === null ? 'var(--muted)' : o.rating.color}">${o.pct === null ? '—' : Math.round(o.pct * 100) + '<small>%</small>'}</div>
+        <div><div class="score-big" style="--sc:${o.pct === null ? 'var(--muted)' : o.rating.color};--sct:${o.pct === null ? 'var(--muted)' : textTone(o.rating.color)}">${o.pct === null ? '—' : Math.round(o.pct * 100) + '<small>%</small>'}</div>
           ${o.pct === null ? '<span class="muted small">Pas encore noté</span>' : ratingChip(o.pct)}</div>
         <div class="score-meta"><b>${done} / 124</b><span>critères</span>
           <span class="muted small">${esc(insp.inspectors || '')}</span></div>
@@ -1120,6 +1141,7 @@ async function vTheme(id, ref) {
   const insp = await db.get('inspections', id);
   if (!insp) return vNotFound();
   if (isLocked(insp)) { location.replace('#/insp/' + id); return; }
+  db.setMeta('lastInsp', { id, ref, at: Date.now() }).catch(() => {});
   const th = THEMES.find(t => t.ref === ref);
   const idx = THEMES.indexOf(th);
   insp.scores ||= {};
@@ -1148,7 +1170,7 @@ async function vTheme(id, ref) {
         <div class="scores">${[0, 1, 2, 3, 4, 5, NA].map(v => `<button type="button" data-v="${v}" class="${v === NA ? 'na' : ''} ${s.v === v ? 'on' : ''}">${v === NA ? 'N/A' : v}</button>`).join('')}</div>
         <div class="crit-tools3">
           <button type="button" class="tbtn ${s.c ? 'on' : ''}" data-cbtn>${ic('edit', 17)}<span>Constat</span></button>
-          <label class="tbtn">${ic('camera', 17)}<span>Photo</span><input type="file" accept="image/*" capture="environment" class="hidden-input" data-photo-in multiple></label>
+          <label class="tbtn">${ic('camera', 17)}<span>Photo</span><input type="file" accept="image/*" class="hidden-input" data-photo-in multiple></label>
           ${cloud.can('actions') ? `<button type="button" class="tbtn ${n ? 'on' : ''}" data-act>${ic('plus', 17)}<span>Action${n ? ` (${n})` : ''}</span></button>` : ''}</div>
         <textarea class="in crit-c" placeholder="Constat / commentaire" data-c ${s.c || (typeof s.v === 'number' && s.v <= 2) ? '' : 'hidden'}>${esc(s.c || '')}</textarea>
         <div class="thumbs" data-thumbs></div><div class="good-slot" data-gs></div></div>`;
@@ -1281,7 +1303,7 @@ async function vSummary(id) {
   const draw = () => {
     const o = overallScore(insp.scores, insp.bonus, insp.penalty);
     $('#sum-out').innerHTML = `
-      <div class="overall" style="background:${o.rating.color};color:${o.rating.fg}"><div>Score global</div><b>${fmtPct(o.pct)}</b><span>${o.pct === null ? 'Pas encore noté' : o.rating.name}</span>
+      <div class="overall" style="background:${o.rating.color};color:${o.rating.fg}"><div>Score global</div><b>${fmtPct(o.pct)}</b><span>${o.pct === null ? 'Pas encore noté' : rName(o.rating)}</span>
         <div class="small">${o.countedThemes}/19 thèmes notés</div></div>
       <div class="sum-list">${o.themes.map(t => {
         const w = t.pct === null ? 0 : Math.round(t.pct * 100), r = rating(t.pct);
@@ -1411,7 +1433,7 @@ function readySheet(file) {
 }
 
 // ---------- actions ----------
-const actionFilters = { sub: '', view: 'todo', insp: '', mode: 'board' };
+const actionFilters = { sub: '', view: 'todo', insp: '', mode: innerWidth < 760 ? 'list' : 'board' }; // téléphone : liste à onglets ; PC : tableau
 async function vActions(q) {
   const editable = cloud.can('actions');
   const setHeader = () => setTop({ title: 'Actions', sub: PROJECT?.name || '', back: q.get('insp') ? '#/insp/' + q.get('insp') : null,
@@ -1574,7 +1596,7 @@ async function shareAction(a, subs, files = []) {
 /** Clôture : proposer la photo « après correction » (le bouton est un vrai champ fichier, compatible iPhone) */
 function afterPhotoSheet(onFiles) {
   openSheet(`<h3>Action clôturée</h3><p class="muted">Ajoutez une photo après correction : elle apparaîtra dans le rapport à côté du constat.</p>
-    <div style="display:grid;gap:10px"><label class="btn primary block">${ic('camera')} Photo après correction<input type="file" accept="image/*" capture="environment" class="hidden-input" id="aft-in"></label>
+    <div style="display:grid;gap:10px"><label class="btn primary block">${ic('camera')} Photo après correction<input type="file" accept="image/*" class="hidden-input" id="aft-in"></label>
     <button class="btn block" data-close>Plus tard</button></div>`,
   (el, close) => el.querySelector('#aft-in').onchange = e => { close(); onFiles(e.target.files); });
 }
@@ -1602,7 +1624,7 @@ async function vAction(id) {
       <label class="f" style="margin-top:0">Observation</label><textarea class="in" data-k="observation" placeholder="Ce qui a été constaté">${esc(a.observation)}</textarea>
       <label class="f">Priorité</label><div class="seg prio-seg" data-seg="priority">${PRIOS.map(p => `<button type="button" data-val="${p}" data-p="${p}" class="${a.priority === p ? 'on' : ''}">${PRIO_FR[p]}</button>`).join('')}</div>
       <label class="f">Photos</label>
-      <label class="btn block">${ic('camera')} Ajouter une photo<input type="file" accept="image/*" capture="environment" class="hidden-input" id="a-photo" multiple></label>
+      <label class="btn block">${ic('camera')} Ajouter une photo<input type="file" accept="image/*" class="hidden-input" id="a-photo" multiple></label>
       <div class="thumbs" id="a-thumbs"></div>
       ${crit ? '' : `<label class="f">Critère PRT concerné</label><select class="in" data-k="critRef"><option value="">—</option>${THEMES.map(t => `<optgroup label="${esc(t.ref + ' ' + t.name)}">${t.criteria.map(c => `<option value="${c.ref}" ${a.critRef === c.ref ? 'selected' : ''}>${c.ref} ${esc(c.name)}</option>`).join('')}</optgroup>`).join('')}</select>`}
     </div>
@@ -1619,7 +1641,7 @@ async function vAction(id) {
 
     <div id="after-sec" ${a.status === 'Closed' || (a.photosAfter || []).length ? '' : 'hidden'}><div class="section-head"><span>Après correction</span><span class="muted small">${(a.photosAfter || []).length || ''}</span></div>
     <div class="card">
-      <label class="btn block">${ic('camera')} Photo après correction<input type="file" accept="image/*" capture="environment" class="hidden-input" id="a-after"></label>
+      <label class="btn block">${ic('camera')} Photo après correction<input type="file" accept="image/*" class="hidden-input" id="a-after"></label>
       <div class="thumbs" id="a-after-thumbs"></div>
     </div></div>
 
@@ -1901,7 +1923,7 @@ async function vTeamAudits() {
     ${groups.map(([label, f]) => { const g = list.filter(f); return g.length ? `<div class="section-head"><span>${label}</span><span class="muted small">${g.length}</span></div>${g.map(a => teamCard(a, subs)).join('')}` : ''; }).join('') || '<div class="empty">Aucun audit de l’équipe pour le moment.</div>'}`;
   view.addEventListener('click', e => { const b = e.target.closest('[data-team]'); if (b) teamSheet(list.find(a => a.id === b.dataset.team), subs); });
 }
-// HSE : un même nom tapé différemment (« axel » / « Axel ») = une seule personne
+// HSE : un même nom tapé différemment (« jean » / « Jean ») = une seule personne
 const hseKey = n => (n || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
 const hseSplit = s => (s || '').split(/\s*(?:,|;|\/|&|\bet\b)\s*/i).map(x => x.trim()).filter(Boolean);
 const titleCase = n => n.replace(/(^|[\s'-])(\p{L})/gu, (m, a, b) => a + b.toUpperCase());
@@ -2011,7 +2033,7 @@ async function vSubs() {
   $('#arch').onchange = e => { showArchived = e.target.checked; render(); };
   $('#bulk') && ($('#bulk').onclick = () => openSheet(`<h3>Import rapide</h3>
     <p class="muted small">Un nom d’entreprise par ligne (copier-coller depuis Excel possible).</p>
-    <textarea class="in" id="bulk-t" style="min-height:180px" placeholder="Alphascaff&#10;Unitec"></textarea>
+    <textarea class="in" id="bulk-t" style="min-height:180px" placeholder="Entreprise A&#10;Entreprise B"></textarea>
     <div class="btns"><button class="btn" data-close>Annuler</button><button class="btn primary" id="bulk-go">Importer</button></div>`,
     (el, close) => el.querySelector('#bulk-go').onclick = async () => {
       const existing = await db.all('subs', { includeDeleted: true });
@@ -2041,7 +2063,7 @@ async function vSubEdit(id) {
   const save = debounce(() => db.put('subs', s), 300);
   onCleanup(() => save.flush());
   view.innerHTML = `
-    <label class="f">Nom *</label><input class="in" data-k="name" value="${esc(s.name)}" placeholder="ex. Alphascaff">
+    <label class="f">Nom *</label><input class="in" data-k="name" value="${esc(s.name)}" placeholder="ex. Entreprise A">
     <label class="f">Type</label>
     <div class="seg type-seg" id="ctype">${Object.entries(COMPANY_TYPES).map(([k, t]) => `<button type="button" data-t="${k}" class="${(s.type || 'entreprise') === k ? 'on' : ''}">${t.label}<small>${t.hint}</small></button>`).join('')}</div>
     <label class="f">Responsable</label><input class="in" data-k="contact" value="${esc(s.contact)}">
@@ -2167,7 +2189,7 @@ async function vProjects() {
     }).join('')}`;
 }
 
-/** Zones d'un plan (Ahmed) : tracer, renommer, supprimer — utilisées ensuite par toute l'équipe pendant les audits */
+/** Zones d'un plan (admin HSE) : tracer, renommer, supprimer — utilisées ensuite par toute l'équipe pendant les audits */
 async function vZones(id) {
   if (!cloud.isAdmin()) return vNotFound();
   const plan = await db.get('plans', id);
@@ -2217,7 +2239,7 @@ async function vZones(id) {
   onCleanup(() => pv.destroy());
   const onDrawn = pts => {
     setMode('');
-    openSheet(`<h3>Nouvelle zone</h3><label class="f" style="margin-top:0">Nom de la zone</label><input class="in" id="zn" placeholder="ex. DCH2 nord, UTI 12…" autocomplete="off">
+    openSheet(`<h3>Nouvelle zone</h3><label class="f" style="margin-top:0">Nom de la zone</label><input class="in" id="zn" placeholder="ex. Bâtiment A nord, Zone 3…" autocomplete="off">
       <div class="btns" style="margin-top:14px"><button class="btn" data-close>Annuler</button><button class="btn primary" id="zok">Ajouter</button></div>`,
     (el, close) => {
       setTimeout(() => el.querySelector('#zn').focus(), 50);
@@ -2262,7 +2284,7 @@ async function vProject(id) {
       <label class="f" style="margin-top:0">Nom du projet *</label><input class="in" data-k="name" value="${esc(p.name)}" placeholder="ex. SAM 3">
       <div class="btns" style="margin-bottom:0">
         <div><label class="f">Code (références)</label><input class="in" data-k="code" value="${esc(p.code)}" placeholder="SAM3" style="text-transform:uppercase"></div>
-        <div><label class="f">Site</label><input class="in" data-k="site" value="${esc(p.site)}" placeholder="Farciennes"></div>
+        <div><label class="f">Site</label><input class="in" data-k="site" value="${esc(p.site)}" placeholder="ex. Ville"></div>
       </div>
       <label class="f">Logos du rapport PDF <span class="muted small">(2 maximum, ex. Jan De Nul + Besix)</span></label>
       <div class="logo-slots">${[['logoId', 'Logo 1'], ['logo2Id', 'Logo 2']].map(([k, l]) => `<div class="logo-slot">
@@ -2361,7 +2383,7 @@ async function vCompanies() {
   view.querySelector('.tabs3').onclick = e => { const b = e.target.closest('[data-cf]'); if (b) { compFilter = b.dataset.cf; draw(); } };
   $('#bulk').onclick = () => openSheet(`<h3>Import rapide</h3>
     <p class="muted small">Un nom par ligne (copier-coller depuis Excel possible). Elles sont ajoutées au projet en cours.</p>
-    <textarea class="in" id="bulk-t" style="min-height:180px" placeholder="Alphascaff&#10;Unitec"></textarea>
+    <textarea class="in" id="bulk-t" style="min-height:180px" placeholder="Entreprise A&#10;Entreprise B"></textarea>
     <div class="btns"><button class="btn" data-close>Annuler</button><button class="btn primary" id="bulk-go">Importer</button></div>`,
     (el, close) => el.querySelector('#bulk-go').onclick = async () => {
       const existing = await db.all('subs', { includeDeleted: true });
@@ -2460,12 +2482,14 @@ async function vSettings() {
   });
   $('#b-reset')?.addEventListener('click', async () => { await setBrand({ appLogoId: null }); toast('Logo d’origine'); render(); });
   $('#bk').onclick = backupNow;
-  if ($('#rs')) $('#rs').onchange = async e => {
-    const f = e.target.files[0]; if (!f) return;
-    if (!await confirmBox('Restaurer cette sauvegarde ?', 'Toutes les données actuelles de l’app seront <b>remplacées</b>.', 'Remplacer mes données')) return;
-    try { await db.importAll(JSON.parse(await f.text())); toast('Restauration terminée'); location.hash = '#/'; render(); }
-    catch (err) { toast('Échec : ' + err.message, 4000); }
-  };
+  if ($('#rs')) $('#rs').onchange = e => restoreFile(e.target.files[0]);
+}
+/** Restaure une sauvegarde ou un kit de démarrage (.json) */
+async function restoreFile(f, kit = false) {
+  if (!f) return;
+  if (!await confirmBox(kit ? 'Importer ce kit de démarrage ?' : 'Restaurer cette sauvegarde ?', kit ? 'Le projet, le plan et les entreprises du kit seront chargés dans l’app.' : 'Toutes les données actuelles de l’app seront <b>remplacées</b>.', kit ? 'Importer' : 'Remplacer mes données')) return;
+  try { await db.importAll(JSON.parse(await f.text())); toast(kit ? 'Kit importé' : 'Restauration terminée'); location.hash = '#/'; render(); }
+  catch (err) { toast('Fichier non reconnu : ' + err.message, 4000); }
 }
 
 // ---------- équipe et accès (admin) ----------
@@ -2848,11 +2872,11 @@ const routes = [
   [/^\/start$/, () => vStart(null), 'home'],
   [/^\/audits$/, vAudits, 'audits'],
   [/^\/audits-team$/, vTeamAudits, 'audits'],
-  [/^\/insp\/([^/]+)$/, vInsp, 'home'],
-  [/^\/insp\/([^/]+)\/edit$/, vInspEdit, 'home'],
-  [/^\/insp\/([^/]+)\/sum$/, vSummary, 'home'],
-  [/^\/insp\/([^/]+)\/report$/, vReport, 'home'],
-  [/^\/insp\/([^/]+)\/t\/([\d.]+)$/, vTheme, 'home'],
+  [/^\/insp\/([^/]+)$/, vInsp, 'audits'],
+  [/^\/insp\/([^/]+)\/edit$/, vInspEdit, 'audits'],
+  [/^\/insp\/([^/]+)\/sum$/, vSummary, 'audits'],
+  [/^\/insp\/([^/]+)\/report$/, vReport, 'audits'],
+  [/^\/insp\/([^/]+)\/t\/([\d.]+)$/, vTheme, 'audits'],
   [/^\/actions$/, vActions, 'actions'],
   [/^\/stats$/, vStats, 'stats'],
   [/^\/action\/([^/]+)$/, vAction, 'actions'],
@@ -2872,7 +2896,7 @@ const routes = [
 ];
 
 let renderSeq = 0;
-/** Suggestions du champ « Inspecteur » : les noms déjà utilisés, écrits proprement (évite « axel » / « Axel ») */
+/** Suggestions du champ « Inspecteur » : les noms déjà utilisés, écrits proprement (évite « jean » / « Jean ») */
 async function fillHseList() {
   let dl = document.getElementById('hse-list');
   if (!dl) { dl = document.createElement('datalist'); dl.id = 'hse-list'; document.body.appendChild(dl); }
@@ -2963,6 +2987,7 @@ async function fixSubs() {
 async function seed() {
   await migrateSeedIds();
   await fixSubs();
+  if (SEED_LOCATIONS.length && !(await db.getMeta('locations'))) await db.setMeta('locations', SEED_LOCATIONS); // noms de zones suggérés (gardés après le 1er démarrage)
   if (await db.getMeta('seeded-v3')) return;
   const existing = await db.all('subs', { includeDeleted: true });
   for (const s of SEED_SUBS) {

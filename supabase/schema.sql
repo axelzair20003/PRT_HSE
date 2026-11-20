@@ -5,7 +5,7 @@
 -- Règles :
 --   • seules les adresses invitées (table invites) peuvent créer un compte
 --   • un inspecteur ne voit que SES audits, actions et photos
---   • l'admin (Ahmed) voit et modifie tout, gère les invitations,
+--   • l'admin (admin HSE) voit et modifie tout, gère les invitations,
 --     les projets, les entreprises et les plans
 --   • chaque invitation porte des droits (créer des audits, voir le détail,
 --     exporter, gérer les actions) et une liste de projets autorisés
@@ -13,8 +13,8 @@
 -- Le script peut être relancé sans risque (mise à jour d'une base existante).
 -- =====================================================================
 
--- ⚠️ AVANT d'exécuter : remplacer ADRESSE-EMAIL-AHMED@exemple.com tout en bas
---    par l'adresse email d'Ahmed (c'est lui qui sera administrateur)
+-- ⚠️ AVANT d'exécuter : remplacer ADRESSE-EMAIL-ADMIN@exemple.com tout en bas
+--    par l'adresse email de l'admin HSE (c'est lui qui sera administrateur)
 
 -- ---------- Tables ----------
 create table if not exists public.invites (
@@ -189,7 +189,7 @@ create policy "shared: admin remplacement" on storage.objects for update
   using (bucket_id = 'shared' and public.is_admin());
 
 -- ---------- Premier administrateur ----------
--- (pas de code pour ce premier compte : Ahmed doit créer son compte JUSTE APRÈS avoir lancé ce script)
+-- (pas de code pour ce premier compte : l'admin HSE doit créer son compte JUSTE APRÈS avoir lancé ce script)
 insert into public.invites (email, name, role, code)
-values (lower('ADRESSE-EMAIL-AHMED@exemple.com'), 'Ahmed', 'admin', null)   -- ⚠️ à remplacer
+values (lower('ADRESSE-EMAIL-ADMIN@exemple.com'), 'Admin HSE', 'admin', null)   -- ⚠️ à remplacer
 on conflict (email) do update set role = 'admin';

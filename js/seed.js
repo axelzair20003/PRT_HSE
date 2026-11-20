@@ -1,7 +1,7 @@
 // Données de départ FACULTATIVES (entreprises, zones, plan) : elles ne sont PAS publiées avec l'app,
 // pour que rien de confidentiel ne soit visible sur Internet. Si un fichier assets/seed.json existe
 // (installation privée), il est lu au premier démarrage ; sinon l'app démarre vide :
-// Ahmed crée le projet, importe le plan et ajoute les entreprises (ou restaure une sauvegarde).
+// L'admin HSE crée le projet, importe le plan et ajoute les entreprises (ou restaure une sauvegarde).
 export let SEED_SUBS = [];
 export let SEED_LOCATIONS = [];
 export let SEED_PLAN = null;   // { name, code, file }

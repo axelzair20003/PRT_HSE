@@ -43,7 +43,7 @@ Alternative Netlify : app.netlify.com → **Add new site → Deploy manually** �
 1. Ouvrir l'URL dans **Safari** (pas Chrome ; c'est obligatoire sur iOS).
 2. Attendre que la page d'accueil s'affiche (l'app se met en cache pour le hors ligne).
 3. Bouton **Partager** (carré avec flèche) → **Sur l'écran d'accueil** → **Ajouter**.
-4. Lancer l'app depuis l'icône « PRT HSE » : elle s'ouvre en plein écran et fonctionne sans réseau.
+4. Lancer l'app depuis l'icône « Audit HSE » : elle s'ouvre en plein écran et fonctionne sans réseau.
 
 ⚠️ Les données sont stockées **dans l'app sur ce téléphone uniquement**. Faire régulièrement **Réglages → Sauvegarde complète (JSON)** et l'envoyer par mail / OneDrive. Ne pas supprimer l'icône de l'app (iOS effacerait les données).
 
@@ -52,12 +52,20 @@ Pour un chantier client, **rien de confidentiel n'est dans le dépôt** : ni pla
 Au premier lancement, l'app démarre vide (« Mon chantier ») :
 1. Réglages → Projets et plans : renommer le projet, **importer le plan** (fichier venant du PC ou d'un mail interne, pas d'internet) ;
 2. Accueil → « Ajouter des entreprises » ;
-3. ou plus simple : **restaurer une sauvegarde** (Réglages → Restaurer) faite sur un téléphone déjà configuré.
-En mode équipe, Ahmed le fait une seule fois : plan et entreprises arrivent ensuite sur tous les téléphones.
+3. ou plus simple : **importer le kit de démarrage** (.json reçu en privé) avec le bouton de l'accueil vide, ou Réglages → Restaurer.
+En mode équipe, l'admin HSE le fait une seule fois : plan et entreprises arrivent ensuite sur tous les téléphones.
 
 Les téléphones qui avaient déjà l'app **gardent** leur plan et leurs audits (ils sont stockés dans le téléphone).
 
 ⚠️ Un fichier supprimé d'un dépôt GitHub public reste visible dans son **historique**. Pour effacer complètement l'ancien plan : supprimer le dépôt, le recréer **avec le même nom**, y envoyer ce zip, puis réactiver GitHub Pages. L'adresse de l'app ne change pas et les données des téléphones sont conservées.
+
+## Nouveautés v3.15
+- Accueil : « Reprendre l’audit en cours » (dernier audit ouvert, moins de 12 h, non terminé).
+- App vierge : bouton « Importer un kit de démarrage » (.json envoyé en privé — jamais sur GitHub).
+- Score lisible en plein soleil ; appréciations en français dans l’app (le PDF anglais reste en anglais).
+- Photo : l’iPhone propose appareil photo OU photothèque.
+- Actions : liste à onglets sur téléphone, tableau sur PC. Onglet « Audits » actif dans un audit.
+- Confidentialité : exemples génériques dans les champs, modèle Excel nettoyé.
 
 ## Nouveautés v3.14
 - L'app s'appelle **Audit HSE** (nouvelle icône) ; l'administrateur peut changer le **nom et le logo** (Réglages → Apparence de l'app), pour toute l'équipe.
@@ -84,7 +92,7 @@ Les téléphones qui avaient déjà l'app **gardent** leur plan et leurs audits 
 - Audits : recherche, filtres entreprise / HSE, états (brouillon, en cours, terminé), mois passés repliés, brouillons oubliés rangés à part.
 - Tournée : la zone sert de titre ; pastille « ZON » dans la barre de tournée.
 - Plan : vues Audits / Actions / Zones · score, période (7 j, 30 j, 3 mois, tout), bulles de regroupement, fiche d'un lieu.
-- Pilotage : HSE fusionnés (« axel » = « Axel »), 5 premiers + « Voir les autres », clic = ses audits.
+- Pilotage : HSE fusionnés (« jean » = « Jean »), 5 premiers + « Voir les autres », clic = ses audits.
 - Action : épingle rouge, zone auditée dessinée, légende ; photo après correction affichée à la clôture.
 - PDF : zoom serré sur la zone, nom de zone sous la zone, 2 logos (Projet → Logos du rapport).
 - Pilotage : bloc « Infractions » (total + tendance, part des règles vitales LSR, entreprise la plus concernée ou classement) + Top 10 en barres, toutes entreprises ou une au choix ; export Excel avec colonne « Objectif ».
@@ -103,19 +111,19 @@ Les téléphones qui avaient déjà l'app **gardent** leur plan et leurs audits 
 - **Exporter / Partager** : Excel (4 feuilles identiques à l'original), PDF (résumé, détail, photos, plan avec épingles, actions) → Mail, WhatsApp, Teams.
 - Plan : filtres sous-traitant / type / thème / priorité / statut ; tap sur le plan = nouvelle observation libre à cet endroit.
 
-## Mode équipe (connexion + Ahmed voit tout) — Supabase gratuit
+## Mode équipe (connexion + l'admin HSE voit tout) — Supabase gratuit
 
 Tant que `js/config.js` est vide, l'app fonctionne **100 % en local** (comme avant).
 Une fois configurée :
 - connexion par **email + mot de passe**, sur **invitation** de l'administrateur ;
 - chaque **inspecteur** fait tout le processus et ne voit **que ses audits et actions** ;
-- l'**administrateur (Ahmed)** voit **les audits de toute l'équipe** (plan, actions, classement, exports) et gère l'équipe (Réglages → Équipe) ;
+- l'**administrateur HSE** voit **les audits de toute l'équipe** (plan, actions, classement, exports) et gère l'équipe (Réglages → Équipe) ;
 - tout reste utilisable **hors ligne** : l'envoi se fait automatiquement au retour du réseau ;
 - le cloisonnement est appliqué **par le serveur** (Row Level Security), pas seulement par l'app.
 
 ### Mise en route (≈ 15 min, une seule fois)
-1. **Créer le projet** : supabase.com → *Start your project* → se connecter (idéalement avec le compte d'Ahmed) → *New project* → nom `prt-hse`, région **Central EU (Frankfurt)**, mot de passe de base de données (à garder) → *Create*.
-2. **Créer la base** : menu **SQL Editor** → *New query* → coller tout le fichier `supabase/schema.sql` → **remplacer `ADRESSE-EMAIL-AHMED@exemple.com`** (tout en bas) par l'email d'Ahmed → **Run**.
+1. **Créer le projet** : supabase.com → *Start your project* → se connecter (idéalement avec le compte de l'admin HSE) → *New project* → nom `prt-hse`, région **Central EU (Frankfurt)**, mot de passe de base de données (à garder) → *Create*.
+2. **Créer la base** : menu **SQL Editor** → *New query* → coller tout le fichier `supabase/schema.sql` → **remplacer `ADRESSE-EMAIL-ADMIN@exemple.com`** (tout en bas) par l'email de l'admin HSE → **Run**.
 3. **Désactiver la confirmation par email** : **Authentication → Sign In / Providers → Email** → décocher **Confirm email** → *Save*.
    (Le service email gratuit de Supabase n'envoie que ~2 emails/heure : on n'en a pas besoin.)
 4. **Récupérer les 2 valeurs** : **Project Settings → API** (ou *Data API* / *API Keys*) :
@@ -126,7 +134,7 @@ Une fois configurée :
    export const CLOUD = { url: 'https://abcd1234.supabase.co', anonKey: 'sb_publishable_…' };
    ```
    puis changer `CACHE` dans `sw.js` (ex. `prt-hse-v2.0.1`) → *Commit changes*.
-6. **Ahmed crée son compte TOUT DE SUITE après l'étape 2** (son invitation n'a pas de code : il faut fermer cette porte au plus vite) : ouvrir l'app → *Créer mon compte* avec son email → il est administrateur et envoie les entreprises et le plan au serveur.
+6. **L'admin HSE crée son compte TOUT DE SUITE après l'étape 2** (son invitation n'a pas de code : il faut fermer cette porte au plus vite) : ouvrir l'app → *Créer mon compte* avec son email → il est administrateur et envoie les entreprises et le plan au serveur.
 7. **Inviter l'équipe** : Réglages → **Équipe et invitations** → nom + email → *Inviter* → envoyer le message à la personne. Le lien contient son **code d'invitation personnel** : sans lui, personne d'autre ne peut créer le compte à son adresse.
 
 ### Au quotidien
@@ -134,6 +142,6 @@ Une fois configurée :
 - **Mot de passe oublié** : supprimer l'utilisateur dans Supabase (**Authentication → Users**) ; l'invitation reste valable (même lien, même code), il recrée son compte. (La réinitialisation par email demande un serveur mail d'entreprise branché sur Supabase.)
 - **Gratuit** : 500 Mo de base (des dizaines de milliers d'audits), 1 Go de photos (≈ 5 000 photos), 50 000 utilisateurs/mois. Un projet gratuit est mis en pause après 7 jours sans activité : les données sont conservées, il suffit de le relancer depuis supabase.com.
 - **Avec 15–20 HSE** : le 1 Go de photos gratuit sera plein en quelques semaines → passer au plan **Pro (25 $/mois)** : 100 Go de photos, 8 Go de base, plus de mise en pause, sauvegardes quotidiennes. À faire payer par le projet / Jan De Nul.
-- **Pas de sauvegarde automatique** en gratuit : Ahmed fait régulièrement Réglages → *Excel — toutes les inspections* et *Sauvegarde complète*.
+- **Pas de sauvegarde automatique** en gratuit : l'admin HSE fait régulièrement Réglages → *Excel — toutes les inspections* et *Sauvegarde complète*.
 - **Données personnelles** : photos de chantier et noms de sous-traitants sont hébergés chez Supabase (UE). À valider avec Jan De Nul si nécessaire.
 
