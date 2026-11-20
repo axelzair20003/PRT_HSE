@@ -1,0 +1,195 @@
+-- =====================================================================
+-- PRT HSE — base de données Supabase
+-- À coller dans Supabase → SQL Editor → New query → Run (une seule fois)
+--
+-- Règles :
+--   • seules les adresses invitées (table invites) peuvent créer un compte
+--   • un inspecteur ne voit que SES audits, actions et photos
+--   • l'admin (admin HSE) voit et modifie tout, gère les invitations,
+--     les projets, les entreprises et les plans
+--   • chaque invitation porte des droits (créer des audits, voir le détail,
+--     exporter, gérer les actions) et une liste de projets autorisés
+--
+-- Le script peut être relancé sans risque (mise à jour d'une base existante).
+-- =====================================================================
+
+-- ⚠️ AVANT d'exécuter : remplacer ADRESSE-EMAIL-ADMIN@exemple.com tout en bas
+--    par l'adresse email de l'admin HSE (c'est lui qui sera administrateur)
+
+-- ---------- Tables ----------
+create table if not exists public.invites (
+  email      text primary key check (email = lower(email)),
+  name       text,
+  role       text not null default 'inspector' check (role in ('admin', 'inspector')),
+  created_at timestamptz not null default now()
+);
+alter table public.invites add column if not exists perms jsonb not null default '{"audit": true, "details": true, "export": true, "actions": true}';
+alter table public.invites add column if not exists projects text[];   -- null = tous les projets
+-- code d'invitation personnel (envoyé dans le lien) : sans lui, impossible de créer le compte à cette adresse
+alter table public.invites add column if not exists code text default upper(substr(md5(random()::text || clock_timestamp()::text), 1, 6));
+
+create table if not exists public.profiles (
+  id         uuid primary key references auth.users on delete cascade,
+  email      text not null,
+  name       text,
+  role       text not null default 'inspector' check (role in ('admin', 'inspector')),
+  active     boolean not null default true,
+  created_at timestamptz not null default now()
+);
+alter table public.profiles add column if not exists perms jsonb not null default '{"audit": true, "details": true, "export": true, "actions": true}';
+alter table public.profiles add column if not exists projects text[];
+
+-- Tous les enregistrements de l'app (même format que dans le téléphone)
+create table if not exists public.docs (
+  id         text primary key,
+  kind       text not null,
+  owner      uuid not null default auth.uid() references auth.users on delete cascade,
+  data       jsonb not null,
+  updated_at timestamptz not null default now(),
+  deleted    boolean not null default false
+);
+alter table public.docs add column if not exists project text;
+alter table public.docs drop constraint if exists docs_kind_check;
+alter table public.docs add constraint docs_kind_check check (kind in ('inspection', 'action', 'sub', 'plan', 'project', 'summary'));
+create index if not exists docs_updated_idx on public.docs (updated_at);
+create index if not exists docs_owner_idx on public.docs (owner);
+
+-- ---------- Fonctions de rôle ----------
+create or replace function public.is_admin() returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from profiles where id = auth.uid() and role = 'admin' and active);
+$$;
+
+-- projet autorisé pour l'utilisateur connecté (liste vide/nulle = tous)
+create or replace function public.can_project(p text) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from profiles where id = auth.uid() and active
+    and (role = 'admin' or projects is null or cardinality(projects) = 0 or p is null or p = any(projects)));
+$$;
+
+-- droit accordé par l'administrateur (les droits « aperçu équipe » et « actions des autres » sont décochés par défaut)
+create or replace function public.has_perm(p text) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from profiles where id = auth.uid() and active and coalesce((perms ->> p)::boolean, false));
+$$;
+
+create or replace function public.is_active() returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from profiles where id = auth.uid() and active);
+$$;
+
+-- ---------- Inscription réservée aux invités ----------
+create or replace function public.handle_new_user() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare inv invites;
+begin
+  select * into inv from invites where email = lower(new.email);
+  if not found then
+    raise exception 'not invited';
+  end if;
+  if inv.code is not null and upper(coalesce(new.raw_user_meta_data ->> 'code', '')) <> upper(inv.code) then
+    raise exception 'bad invite code';
+  end if;
+  insert into profiles (id, email, name, role, perms, projects)
+  values (new.id, lower(new.email), coalesce(nullif(new.raw_user_meta_data ->> 'name', ''), inv.name), inv.role, inv.perms, inv.projects);
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function public.handle_new_user();
+
+-- ---------- Sécurité (Row Level Security) ----------
+alter table public.invites  enable row level security;
+alter table public.profiles enable row level security;
+alter table public.docs     enable row level security;
+
+drop policy if exists "invites: admin" on public.invites;
+create policy "invites: admin" on public.invites
+  for all using (public.is_admin()) with check (public.is_admin());
+
+drop policy if exists "profiles: lecture" on public.profiles;
+create policy "profiles: lecture" on public.profiles
+  for select using (id = auth.uid() or public.is_admin());
+
+drop policy if exists "profiles: admin modifie" on public.profiles;
+create policy "profiles: admin modifie" on public.profiles
+  for update using (public.is_admin()) with check (public.is_admin());
+
+drop policy if exists "docs: lecture" on public.docs;
+create policy "docs: lecture" on public.docs
+  for select using (
+    public.is_active() and (
+      kind = 'sub' or owner = auth.uid() or public.is_admin()
+      -- plans et projets : seulement ceux des projets autorisés
+      or (kind in ('plan', 'project') and public.can_project(project))
+      -- aperçu des audits de l'équipe (date, zone, entreprise, score — sans le détail)
+      or (kind = 'summary' and public.has_perm('team') and public.can_project(project))
+      -- actions relevées par les autres HSE (l'app n'affiche que celles encore ouvertes)
+      or (kind = 'action' and public.has_perm('teamActions') and public.can_project(project))
+    )
+  );
+
+drop policy if exists "docs: création" on public.docs;
+create policy "docs: création" on public.docs
+  for insert with check (
+    public.is_active() and ((kind in ('inspection', 'action', 'summary') and owner = auth.uid() and public.can_project(project)) or public.is_admin())
+  );
+
+drop policy if exists "docs: modification" on public.docs;
+create policy "docs: modification" on public.docs
+  for update
+  using (public.is_active() and ((kind in ('inspection', 'action', 'summary') and owner = auth.uid()) or public.is_admin()))
+  with check (public.is_active() and ((kind in ('inspection', 'action', 'summary') and owner = auth.uid() and public.can_project(project)) or public.is_admin()));
+-- pas de suppression physique : l'app marque deleted = true
+
+-- ---------- Stockage des fichiers ----------
+-- photos : dossier par utilisateur ;  shared : plans et logos (lisibles par tous les comptes actifs)
+insert into storage.buckets (id, name, public) values ('photos', 'photos', false), ('shared', 'shared', false)
+on conflict (id) do nothing;
+
+drop policy if exists "photos: lecture" on storage.objects;
+create policy "photos: lecture" on storage.objects for select
+  using (bucket_id = 'photos' and (public.is_admin() or (storage.foldername(name))[1] = auth.uid()::text));
+
+drop policy if exists "photos: envoi" on storage.objects;
+create policy "photos: envoi" on storage.objects for insert
+  with check (bucket_id = 'photos' and public.is_active() and ((storage.foldername(name))[1] = auth.uid()::text or public.is_admin()));
+
+-- photos des actions encore ouvertes des autres HSE (droit « Actions des autres »)
+drop policy if exists "photos: actions des autres" on storage.objects;
+create policy "photos: actions des autres" on storage.objects for select
+  using (bucket_id = 'photos' and public.is_active() and public.has_perm('teamActions') and exists (
+    select 1 from public.docs d
+    where d.kind = 'action' and not d.deleted and public.can_project(d.project)
+      and d.owner::text = (storage.foldername(name))[1]
+      and (d.data -> 'photos') ? storage.filename(name)));
+
+-- suppression : chacun ses photos (l'admin toutes), pour ne pas payer le stockage de photos effacées
+drop policy if exists "photos: suppression" on storage.objects;
+create policy "photos: suppression" on storage.objects for delete
+  using (bucket_id = 'photos' and ((storage.foldername(name))[1] = auth.uid()::text or public.is_admin()));
+
+drop policy if exists "photos: remplacement" on storage.objects;
+create policy "photos: remplacement" on storage.objects for update
+  using (bucket_id = 'photos' and ((storage.foldername(name))[1] = auth.uid()::text or public.is_admin()));
+
+drop policy if exists "shared: lecture" on storage.objects;
+create policy "shared: lecture" on storage.objects for select
+  using (bucket_id = 'shared' and public.is_active());
+
+drop policy if exists "shared: admin envoi" on storage.objects;
+create policy "shared: admin envoi" on storage.objects for insert
+  with check (bucket_id = 'shared' and public.is_admin());
+
+drop policy if exists "shared: admin remplacement" on storage.objects;
+create policy "shared: admin remplacement" on storage.objects for update
+  using (bucket_id = 'shared' and public.is_admin());
+
+-- ---------- Premier administrateur ----------
+-- (pas de code pour ce premier compte : l'admin HSE doit créer son compte JUSTE APRÈS avoir lancé ce script)
+insert into public.invites (email, name, role, code)
+values (lower('ADRESSE-EMAIL-ADMIN@exemple.com'), 'Admin HSE', 'admin', null)   -- ⚠️ à remplacer
+on conflict (email) do update set role = 'admin';
