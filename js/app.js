@@ -10,7 +10,7 @@ import { SEED_SUBS, SEED_LOCATIONS, SEED_PLAN, SEED_SITE, SEED_PROJECT, loadSeed
 import { CRIT_FR, THEME_FR, TXT as RTXT, RATING_FR, RANGE_FR } from './report-fr.js';
 import { REPORT_DEFAULTS, REPORT_TITLES, buildXLSX, buildPDF, shareFile, download, canShareFile, actionRef } from './export.js';
 
-export const APP_VERSION = '4.0.1';
+export const APP_VERSION = '4.0.2';
 
 // ---------- utilitaires ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -506,6 +506,7 @@ async function vHome() {
   const fn = await firstName();
   const hello = new Date().getHours() >= 18 ? 'Bonsoir' : 'Bonjour';
   const nActive = subList.filter(s => !s.archived).length;
+  view.classList.add('v-home');
   view.innerHTML = `
     ${cloud.enabled ? '<button class="sync-pill" id="sync-now" hidden></button>' : ''}
     <section class="greet"><small>${esc(today.charAt(0).toUpperCase() + today.slice(1))}</small><h1>${hello}${fn ? ' ' + esc(fn) : ''}</h1></section>

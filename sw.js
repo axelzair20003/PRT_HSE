@@ -1,6 +1,6 @@
 // Service worker : tout le code de l'app est mis en cache → fonctionnement 100 % hors ligne.
 // Pour publier une mise à jour : modifier CACHE (ex. v1.0.1), puis rouvrir l'app 2 fois.
-const CACHE = 'prt-hse-v4.0.1';
+const CACHE = 'prt-hse-v4.0.2';
 const FILES = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css', 'css/v4.css',
   'assets/fonts/plex-400.woff2', 'assets/fonts/plex-500.woff2', 'assets/fonts/plex-600.woff2', 'assets/fonts/plex-700.woff2',
