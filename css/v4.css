@@ -264,3 +264,11 @@ label.f { font-weight: 500; font-size: 14px; color: var(--muted); }
   .pl-foot a { padding-left: 22px; }
   .home-cols { margin-top: 8px; }
 }
+
+/* boutons secondaires : bien visibles sur le fond gris (blanc + contour), y compris sous le plan */
+.btn:not(.primary):not(.danger) { background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--line-2), var(--sh-1); }
+:root[data-theme="dark"] .btn:not(.primary):not(.danger) { background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line-2); }
+.btn:not(.primary):not(.danger):active { background: var(--surface-2); }
+/* zones sur la photo aérienne : trait plus épais et plus clair pour bien les voir au soleil */
+.pv-area.k-zone { stroke-width: 3.5px; stroke-dasharray: 9 5; stroke-opacity: 1; fill-opacity: .16; }
+.pv-area.k-sel { stroke-width: 4px; }
