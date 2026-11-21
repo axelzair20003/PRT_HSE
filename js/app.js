@@ -10,7 +10,7 @@ import { SEED_SUBS, SEED_LOCATIONS, SEED_PLAN, SEED_SITE, SEED_PROJECT, loadSeed
 import { CRIT_FR, THEME_FR, TXT as RTXT, RATING_FR, RANGE_FR } from './report-fr.js';
 import { REPORT_DEFAULTS, REPORT_TITLES, buildXLSX, buildPDF, shareFile, download, canShareFile, actionRef } from './export.js';
 
-export const APP_VERSION = '4.0.2';
+export const APP_VERSION = '4.0.3';
 
 // ---------- utilitaires ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -1582,6 +1582,7 @@ async function vActions(q) {
 }
 
 /** Glisser-déposer des cartes entre colonnes : appui long (doigt) ou clic maintenu (souris) */
+let boardDragOff = null;
 function enableBoardDrag(board, onDrop) {
   let timer = null, drag = null, start = null, scrollTimer = null;
   const colAt = (x, y) => document.elementFromPoint(x, y)?.closest('.kcol');
@@ -1626,13 +1627,24 @@ function enableBoardDrag(board, onDrop) {
     const t = e.touches[0]; start = { x: t.clientX, y: t.clientY };
     timer = setTimeout(() => { timer = null; begin(card, start.x, start.y); }, 300);
   }, { passive: true });
-  board.addEventListener('touchmove', e => {
+  const tMove = e => {
     const t = e.touches[0];
     if (drag) { e.preventDefault(); move(t.clientX, t.clientY); return; }
     if (timer && Math.hypot(t.clientX - start.x, t.clientY - start.y) > 8) cancel(); // c'est un défilement
-  }, { passive: false });
-  board.addEventListener('touchend', e => { cancel(); if (drag) { e.preventDefault(); const t = e.changedTouches[0]; end(t.clientX, t.clientY); } });
-  board.addEventListener('touchcancel', () => { cancel(); clearInterval(scrollTimer); drag = null; sweep(); });
+  };
+  // fin du geste écoutée sur toute la page : si la carte a été redessinée pendant le glisser,
+  // iOS n'envoie plus l'événement au tableau et la carte fantôme restait bloquée à l'écran
+  const tEnd = e => { cancel(); if (drag) { e.preventDefault(); const t = e.changedTouches[0]; end(t.clientX, t.clientY); } };
+  const tCancel = () => { cancel(); clearInterval(scrollTimer); drag = null; sweep(); };
+  // nouveau toucher alors qu'un glisser est encore « ouvert » (fin manquée) : on nettoie
+  const tStartAny = e => { if (drag && e.touches.length === 1) tCancel(); };
+  boardDragOff?.(); // tableau redessiné : on retire les écouteurs du précédent (et tout glisser en cours)
+  document.addEventListener('touchmove', tMove, { passive: false });
+  document.addEventListener('touchend', tEnd, { passive: false });
+  document.addEventListener('touchcancel', tCancel);
+  document.addEventListener('touchstart', tStartAny, { capture: true, passive: true });
+  const off = () => { tCancel(); document.removeEventListener('touchmove', tMove); document.removeEventListener('touchend', tEnd); document.removeEventListener('touchcancel', tCancel); document.removeEventListener('touchstart', tStartAny, { capture: true }); if (boardDragOff === off) boardDragOff = null; };
+  boardDragOff = off; onCleanup(off);
   // l'app passe en arrière-plan ou le doigt se lève hors du tableau : on nettoie
   const lost = () => { cancel(); clearInterval(scrollTimer); if (drag) { drag = null; sweep(); } };
   window.addEventListener('pagehide', lost); document.addEventListener('visibilitychange', lost);
