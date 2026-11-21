@@ -10,7 +10,7 @@ import { SEED_SUBS, SEED_LOCATIONS, SEED_PLAN, SEED_SITE, SEED_PROJECT, loadSeed
 import { CRIT_FR, THEME_FR, TXT as RTXT, RATING_FR, RANGE_FR } from './report-fr.js';
 import { REPORT_DEFAULTS, REPORT_TITLES, buildXLSX, buildPDF, shareFile, download, canShareFile, actionRef } from './export.js';
 
-export const APP_VERSION = '3.15.0';
+export const APP_VERSION = '3.16.0';
 
 // ---------- utilitaires ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -112,10 +112,37 @@ const inkOn = hex => {
 /** couleur de note utilisée comme TEXTE sur fond clair : jaune et orange foncés pour rester lisibles */
 const textTone = c => ({ '#FBC02D': '#8A6100', '#EF6C00': '#B45309' })[c] || c;
 /** pose --on (couleur du texte) sur tout élément coloré par une entreprise (--c) */
-function applyInk(root) {
-  root.querySelectorAll?.('[style*="--c"]').forEach(el => { const c = el.style.getPropertyValue('--c'); if (c) el.style.setProperty('--on', inkOn(c)); });
+function inkEl(el) {
+  const c = el.style?.getPropertyValue('--c'); if (!c) return;
+  const strong = inkStrong(c);
+  el.style.setProperty('--on', strong ? '#fff' : inkOn(c));
+  if (strong) el.style.setProperty('--cbg', strong); else el.style.removeProperty('--cbg');
 }
-const subChip = s => s ? `<span class="chip" style="background:${esc(s.color || '#1A56A8')};color:${inkOn(s.color || '#1A56A8')}">${esc(s.name || 'Sans nom')}</span>` : '<span class="chip" style="background:#9E9E9E">—</span>';
+function applyInk(root) {
+  if (root.style) inkEl(root);
+  root.querySelectorAll?.('[style*="--c"]').forEach(inkEl);
+  // champs sans étiquette : nom lu par VoiceOver = texte d'exemple
+  const FIELDS = 'input:not([type=hidden]):not([type=file]), select, textarea';
+  [...(root.matches?.(FIELDS) ? [root] : []), ...(root.querySelectorAll?.(FIELDS) || [])].forEach(labelField);
+}
+/** champ sans étiquette : nom lu par VoiceOver = étiquette visible voisine ou texte d'exemple */
+function labelField(el) {
+  if (el.getAttribute('aria-label') || el.labels?.length || el.getAttribute('aria-labelledby')) return;
+  const prev = el.previousElementSibling, near = prev && /^(LABEL|SPAN|B|SMALL|H3|H4|P)$/.test(prev.tagName) && prev.textContent.trim().length < 60 ? prev.textContent : '';
+  const t = near || el.getAttribute('placeholder') || el.getAttribute('title') || (el.tagName === 'SELECT' ? el.options[0]?.textContent : '');
+  if (t) el.setAttribute('aria-label', t.replace(/[…:*]+\s*$/, '').trim());
+}
+/** couleur intermédiaire (ni texte noir ni blanc à 4,5:1) → fond assombri pour un texte blanc lisible */
+function inkStrong(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '').trim()); if (!m) return null;
+  let [r, g, b] = [0, 2, 4].map(i => parseInt(m[1].slice(i, i + 2), 16));
+  const lum = (r, g, b) => { const f = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
+  const L = lum(r, g, b);
+  if (Math.max(1.05 / (L + 0.05), (L + 0.05) / (0.0137 + 0.05)) >= 4.5) return null;
+  for (let k = 0; k < 20 && 1.05 / (lum(r, g, b) + 0.05) < 4.6; k++) { r *= 0.93; g *= 0.93; b *= 0.93; }
+  return '#' + [r, g, b].map(v => Math.round(v).toString(16).padStart(2, '0')).join('');
+}
+const subChip = s => s ? `<span class="chip" style="background:${esc(inkStrong(s.color || '#1A56A8') || s.color || '#1A56A8')};color:${inkStrong(s.color || '#1A56A8') ? '#fff' : inkOn(s.color || '#1A56A8')}">${esc(s.name || 'Sans nom')}</span>` : '<span class="chip" style="background:#9E9E9E">—</span>';
 
 /** Sauvegarde complète (JSON) : à garder hors du téléphone (mail, OneDrive…) */
 async function backupNow() {
@@ -519,12 +546,12 @@ function subGrid(subList, insps = [], acts = []) {
     const open = acts.filter(a => a.subId === s.id && a.status !== 'Closed').length;
     const late = acts.filter(a => a.subId === s.id && isLate(a)).length;
     const r = rating(pct);
-    const status = last?.date === today ? '<span class="tile-tag">En cours</span>'
+    const status = last?.date === today ? '<span class="st-tag s-wip">En cours</span>'
       : last ? `<span class="tile-score" style="background:${pct === null ? 'var(--surface-2)' : r.color};color:${pct === null ? 'var(--muted)' : r.fg}">${pct === null ? '—' : Math.round(pct * 100) + '%'}</span><span>${dateFR(last.date).slice(0, 5)}</span>`
       : '<span class="tile-none">Aucun audit</span>';
     return `<button type="button" class="sub-tile" data-start="${s.id}" style="--c:${esc(s.color)}">
       <span class="tile-top"><span class="mono">${esc(abbr(s.name))}</span><span class="tile-name"><b>${esc(s.name)}</b>${s.type === 'sub' ? `<span class="tile-type">${COMPANY_TYPES.sub.label}</span>` : ''}</span></span>
-      <span class="tile-meta">${status}${open ? `<span class="tile-act ${late ? 'late' : ''}">${ic('list', 14)}${open}</span>` : ''}</span>
+      <span class="tile-meta">${status}${open ? `<span class="tile-act ${late ? 'late' : ''}">${late ? `${late} en retard` : `${open} action${open > 1 ? 's' : ''}`}</span>` : ''}</span>
     </button>`;
   }).join('')}</div>`;
 }
@@ -3010,7 +3037,6 @@ async function seed() {
 // couleurs lisibles partout, y compris sur ce qui s'affiche après coup (épingles, listes…)
 new MutationObserver(ms => ms.forEach(m => m.addedNodes.forEach(n => {
   if (n.nodeType !== 1) return;
-  const c = n.style?.getPropertyValue('--c'); if (c) n.style.setProperty('--on', inkOn(c));
   applyInk(n);
 }))).observe(document.body, { childList: true, subtree: true });
 (async function boot() {

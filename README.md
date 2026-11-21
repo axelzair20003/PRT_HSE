@@ -59,6 +59,12 @@ Les téléphones qui avaient déjà l'app **gardent** leur plan et leurs audits 
 
 ⚠️ Un fichier supprimé d'un dépôt GitHub public reste visible dans son **historique**. Pour effacer complètement l'ancien plan : supprimer le dépôt, le recréer **avec le même nom**, y envoyer ce zip, puis réactiver GitHub Pages. L'adresse de l'app ne change pas et les données des téléphones sont conservées.
 
+## Nouveautés v3.16 (audit design Apple / Vercel / Refactoring UI)
+- Accueil : pastille « En cours » claire, « 3 actions » / « 2 en retard » écrit en clair.
+- Contrastes : pastilles d'entreprise et épingles toujours lisibles (couleur assombrie si besoin), « PRESTATAIRE » plus foncé.
+- Épingles du plan : zone de toucher 44 px (gants).
+- Chiffres alignés, contour clavier sur PC, encoche en paysage, champs nommés pour VoiceOver.
+
 ## Nouveautés v3.15
 - Accueil : « Reprendre l’audit en cours » (dernier audit ouvert, moins de 12 h, non terminé).
 - App vierge : bouton « Importer un kit de démarrage » (.json envoyé en privé — jamais sur GitHub).
