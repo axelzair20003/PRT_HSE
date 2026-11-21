@@ -10,7 +10,7 @@ import { SEED_SUBS, SEED_LOCATIONS, SEED_PLAN, SEED_SITE, SEED_PROJECT, loadSeed
 import { CRIT_FR, THEME_FR, TXT as RTXT, RATING_FR, RANGE_FR } from './report-fr.js';
 import { REPORT_DEFAULTS, REPORT_TITLES, buildXLSX, buildPDF, shareFile, download, canShareFile, actionRef } from './export.js';
 
-export const APP_VERSION = '3.16.0';
+export const APP_VERSION = '4.0.0';
 
 // ---------- utilitaires ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -94,14 +94,17 @@ function showScale() {
     ${SCALE.map(s => `<div class="scale-row"><b>${s.v}</b><div>${esc(s.fr)}<div class="muted small">${esc(s.en)}</div></div></div>`).join('')}
     <div class="scale-row"><b style="font-size:16px">N/A</b><div>Non applicable — exclu du total et du maximum</div></div>
     <h3 style="margin-top:16px">Appréciation</h3>
-    ${RATINGS.map(r => `<div class="row" style="margin:6px 0"><span class="badge" style="background:${r.color};color:${r.fg};min-width:130px">${rName(r)}</span><span>${esc(RANGE_FR[r.name] || r.range)}</span></div>`).join('')}
+    ${RATINGS.map(r => `<div class="row" style="margin:6px 0"><span class="badge ${TN[r.name]}" style="min-width:130px">${rName(r)}</span><span>${esc(RANGE_FR[r.name] || r.range)}</span></div>`).join('')}
     <p class="muted small">Un thème entièrement N/A est exclu de la moyenne globale. Overall = moyenne des thèmes notés + Bonus/100 − Pénalité/100, borné 0–100 %.</p>
     <button class="btn block primary" data-close>Fermer</button>`);
 }
 
-const badge = pct => { const r = rating(pct); return `<span class="badge" style="background:${r.color};color:${r.fg}">${pct === null ? 'N/A' : Math.round(pct * 100) + '%'}</span>`; };
+const TN = { Excellent: 'tn-ex', Good: 'tn-good', Satisfactory: 'tn-sat', Weak: 'tn-weak', Unacceptable: 'tn-bad' };
+/** classe de ton doux (pastilles) selon le score — v4 */
+const tnCls = pct => pct === null || pct === undefined ? 'tn-na' : (TN[rating(pct).name] || 'tn-na');
+const badge = pct => `<span class="badge ${tnCls(pct)}">${pct === null ? 'N/A' : Math.round(pct * 100) + '%'}</span>`;
 const rName = r => RATING_FR[r.name] || r.name; // libellé affiché dans l'app (le PDF anglais garde l'anglais)
-const ratingChip = pct => { const r = rating(pct); return `<span class="chip" style="background:${r.color};color:${r.fg}">${rName(r)}</span>`; };
+const ratingChip = pct => `<span class="chip ${tnCls(pct)}">${rName(rating(pct))}</span>`;
 /** Texte lisible sur une couleur d'entreprise : foncé sur les couleurs claires (jaune, orange clair…), blanc sinon */
 const inkOn = hex => {
   const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '').trim()); if (!m) return '#fff';
@@ -142,7 +145,7 @@ function inkStrong(hex) {
   for (let k = 0; k < 20 && 1.05 / (lum(r, g, b) + 0.05) < 4.6; k++) { r *= 0.93; g *= 0.93; b *= 0.93; }
   return '#' + [r, g, b].map(v => Math.round(v).toString(16).padStart(2, '0')).join('');
 }
-const subChip = s => s ? `<span class="chip" style="background:${esc(inkStrong(s.color || '#1A56A8') || s.color || '#1A56A8')};color:${inkStrong(s.color || '#1A56A8') ? '#fff' : inkOn(s.color || '#1A56A8')}">${esc(s.name || 'Sans nom')}</span>` : '<span class="chip" style="background:#9E9E9E">—</span>';
+const subChip = s => s ? `<span class="chip sub" title="${esc(s.name || '')}" style="background:${esc(inkStrong(s.color || '#1A56A8') || s.color || '#1A56A8')};color:${inkStrong(s.color || '#1A56A8') ? '#fff' : inkOn(s.color || '#1A56A8')}">${esc(s.name || 'Sans nom')}</span>` : '<span class="chip" style="background:#9E9E9E">—</span>';
 
 /** Sauvegarde complète (JSON) : à garder hors du téléphone (mail, OneDrive…) */
 async function backupNow() {
@@ -453,7 +456,38 @@ async function resumeCard(subs) {
   const what = subIdsOf(i).length ? esc(auditLabel(i, subs)) : (zoneTxt || 'Audit de zone');
   const meta = [subIdsOf(i).length ? zoneTxt : '', `${n}/124`].filter(Boolean).join(' · ');
   const th = last.ref && THEMES.find(t => t.ref === last.ref);
-  return `<a class="resume-card" href="#/insp/${i.id}${th ? '/t/' + th.ref : ''}">${ic('clock', 22)}<span><b>Reprendre l’audit en cours</b><small>${what} · ${meta}${th ? ` · thème ${th.ref.split('.')[0]}` : ''}</small></span>${ic('chevron', 20)}</a>`;
+  const pc = Math.round(n / 124 * 100);
+  return `<a class="resume-card" href="#/insp/${i.id}${th ? '/t/' + th.ref : ''}"><span class="mini-ring" style="--p:${pc}" aria-hidden="true"><span>${pc}%</span></span><span><b>Reprendre l’audit en cours</b><small>${what} · ${meta}${th ? ` · thème ${th.ref.split('.')[0]}` : ''}</small></span>${ic('chevron', 20)}</a>`;
+}
+/** « Pouls du chantier » : score moyen 30 j, tendance, courbe des 8 dernières semaines */
+function pulseCard(insps, month, avgPct, nLate, nOpen) {
+  const DAY = 864e5, now = Date.now();
+  const pctOf = i => overallScore(i.scores, i.bonus, i.penalty).pct;
+  const avg = l => { const v = l.map(pctOf).filter(x => x !== null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
+  const from = d => new Date(now - d * DAY).toISOString().slice(0, 10);
+  const prev = avg(insps.filter(i => i.date >= from(60) && i.date < from(30)));
+  const delta = avgPct !== null && prev !== null ? Math.round((avgPct - prev) * 100) : null;
+  const weeks = Array.from({ length: 8 }, (_, k) => avg(insps.filter(i => i.date >= from((8 - k) * 7) && i.date < from((7 - k) * 7))));
+  const vals = weeks.filter(v => v !== null), mid = vals.length ? (Math.min(...vals) + Math.max(...vals)) / 2 : 0.75;
+  const span = Math.max(0.12, vals.length ? Math.max(...vals) - Math.min(...vals) : 0) * 1.25;
+  const pts = weeks.map((v, k) => v === null ? null : [k * (116 / 7) + 2, 24 - ((v - mid) / span) * 36]).filter(Boolean);
+  const line = pts.map(p => p.map(n => n.toFixed(1)).join(',')).join(' ');
+  const last = pts[pts.length - 1];
+  const spark = pts.length > 1 ? `<svg class="pl-spark" viewBox="0 0 120 44" aria-hidden="true"><defs><linearGradient id="plg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFC20E" stop-opacity=".32"/><stop offset="1" stop-color="#FFC20E" stop-opacity="0"/></linearGradient></defs><polygon points="${pts[0][0].toFixed(1)},44 ${line} ${last[0].toFixed(1)},44" fill="url(#plg)"/><polyline points="${line}" class="pl-line"/><circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="3.5" class="pl-dot"/></svg>` : '';
+  const trend = delta === null ? '' : `<span class="pl-trend ${delta > 0 ? 'up' : delta < 0 ? 'down' : ''}">${delta === 0 ? 'Stable' : `${delta > 0 ? '▲ +' : '▼ '}${delta} pt${Math.abs(delta) > 1 ? 's' : ''}`}</span>`;
+  return `<section class="pulse">
+    <a class="pl-main" href="${cloud.isAdmin() ? '#/stats' : '#/audits'}">
+      <span class="pl-top"><span>Score moyen du chantier · 30 jours</span>${trend}</span>
+      <span class="pl-row"><b>${avgPct === null ? '—' : Math.round(avgPct * 100)}${avgPct === null ? '' : '<small> %</small>'}</b>${spark}</span>
+    </a>
+    <div class="pl-foot"><a href="#/audits"><b>${month.length}</b> audit${month.length > 1 ? 's' : ''}</a><a href="#/actions"><b>${nOpen}</b> action${nOpen > 1 ? 's' : ''} ouverte${nOpen > 1 ? 's' : ''}</a><a href="#/actions?late=1" class="${nLate ? 'late' : 'ok'}">${nLate ? `<b>${nLate}</b> en retard` : 'Rien en retard'}</a></div>
+  </section>`;
+}
+/** prénom de la personne connectée (ou de l'inspecteur réglé), pour lui parler simplement */
+async function firstName() {
+  const raw = cloud.enabled ? cloud.myName() : (await getSettings()).inspector;
+  const w = String(raw || '').split('@')[0].split(/[\s._-]+/).filter(Boolean)[0] || '';
+  return w ? w[0].toUpperCase() + w.slice(1).toLowerCase() : '';
 }
 async function vHome() {
   setTop({ title: PROJECT?.name || 'Inspections HSE', sub: 'Inspections HSE · changer de projet', onTitle: projectSheet, actions: [{ icon: 'gear', aria: 'Réglages', onClick: () => location.hash = '#/settings' }] });
@@ -469,8 +503,12 @@ async function vHome() {
   const openActs = acts.filter(a => a.status !== 'Closed').length;
   const notices = await homeNotices(insps.length);
   const resume = cloud.can('audit') ? await resumeCard(subs) : '';
+  const fn = await firstName();
+  const hello = new Date().getHours() >= 18 ? 'Bonsoir' : 'Bonjour';
+  const nActive = subList.filter(s => !s.archived).length;
   view.innerHTML = `
     ${cloud.enabled ? '<button class="sync-pill" id="sync-now" hidden></button>' : ''}
+    <section class="greet"><small>${esc(today.charAt(0).toUpperCase() + today.slice(1))}</small><h1>${hello}${fn ? ' ' + esc(fn) : ''}</h1></section>
     ${notices}
     <section class="home-hero">
       <div class="hero-id">
@@ -487,8 +525,9 @@ async function vHome() {
     </section>
     ${resume}
     ${cloud.can('audit') ? `<a class="btn primary big new-audit" href="#/start">${ic('plus')}<span>Nouvel audit<small>zone, une ou plusieurs entreprises</small></span></a>` : ''}
+    ${pulseCard(insps, month, avgPct, late.length, openActs)}
     <div class="home-cols"><div class="home-main">
-    <div class="section-head"><span>Audit rapide</span><span class="muted small" style="text-transform:capitalize">${esc(today)}</span></div>
+    <div class="section-head"><span>Audit rapide</span>${nActive ? `<span class="muted small">${nActive} entreprise${nActive > 1 ? 's' : ''}</span>` : ''}</div>
     ${cloud.can('audit') ? (subList.some(s => !s.archived) ? subGrid(subList, insps, acts) : noCompanyCard()) : '<div class="card muted">Votre accès ne permet pas de lancer des audits. Contactez l’administrateur HSE.</div>'}
     </div><div class="home-side">
     ${late.length ? `<div class="section-head late"><span class="row" style="gap:6px">${ic('alert', 18)} Actions en retard</span><span>${late.length}</span></div>
@@ -545,13 +584,16 @@ function subGrid(subList, insps = [], acts = []) {
     const pct = last ? overallScore(last.scores, last.bonus, last.penalty).pct : null;
     const open = acts.filter(a => a.subId === s.id && a.status !== 'Closed').length;
     const late = acts.filter(a => a.subId === s.id && isLate(a)).length;
-    const r = rating(pct);
-    const status = last?.date === today ? '<span class="st-tag s-wip">En cours</span>'
-      : last ? `<span class="tile-score" style="background:${pct === null ? 'var(--surface-2)' : r.color};color:${pct === null ? 'var(--muted)' : r.fg}">${pct === null ? '—' : Math.round(pct * 100) + '%'}</span><span>${dateFR(last.date).slice(0, 5)}</span>`
-      : '<span class="tile-none">Aucun audit</span>';
+    const isToday = last?.date === today;
+    const meta = isToday ? 'Audit en cours'
+      : late ? `${late} action${late > 1 ? 's' : ''} en retard`
+      : last ? `Dernier audit le ${dateFR(last.date).slice(0, 5)}${open ? ` · ${open} action${open > 1 ? 's' : ''}` : ''}`
+      : 'Aucun audit';
+    const pill = isToday ? '<span class="st-pill st-tag s-wip">En cours</span>' : last && pct !== null ? `<span class="st-pill ${tnCls(pct)}">${pct === null ? '—' : Math.round(pct * 100) + ' %'}</span>` : '';
     return `<button type="button" class="sub-tile" data-start="${s.id}" style="--c:${esc(s.color)}">
-      <span class="tile-top"><span class="mono">${esc(abbr(s.name))}</span><span class="tile-name"><b>${esc(s.name)}</b>${s.type === 'sub' ? `<span class="tile-type">${COMPANY_TYPES.sub.label}</span>` : ''}</span></span>
-      <span class="tile-meta">${status}${open ? `<span class="tile-act ${late ? 'late' : ''}">${late ? `${late} en retard` : `${open} action${open > 1 ? 's' : ''}`}</span>` : ''}</span>
+      <span class="mono">${esc(abbr(s.name))}</span>
+      <span class="st-main"><b>${esc(s.name)}</b><small class="${late && !isToday ? 'late' : ''}">${s.type === 'sub' ? COMPANY_TYPES.sub.label + ' · ' : ''}${meta}</small></span>
+      ${pill}${ic('chevron', 18).replace('class="ic"', 'class="ic st-chev"')}
     </button>`;
   }).join('')}</div>`;
 }
@@ -1313,6 +1355,7 @@ async function vSummary(id) {
   if (isLocked(insp)) { location.replace('#/insp/' + id); return; }
   const { subs } = await maps();
   setTop({ title: 'Résumé', sub: auditLabel(insp, subs), back: '#/insp/' + id, actions: [helpAction] });
+  const fnName = await firstName(); let firstDraw = true;
   const save = debounce(() => db.put('inspections', insp), 300);
   onCleanup(() => save.flush());
   view.innerHTML = `
@@ -1329,19 +1372,32 @@ async function vSummary(id) {
     </div>`;
   const draw = () => {
     const o = overallScore(insp.scores, insp.bonus, insp.penalty);
+    const pc = o.pct === null ? 0 : Math.round(o.pct * 1000) / 10;
+    const ringC = o.pct === null ? 'var(--line-2)' : ({ Excellent: '#1B5E20', Good: '#2E7D32', Satisfactory: '#A87900', Weak: '#C25A00', Unacceptable: '#C62828' })[o.rating.name];
+    const done = auditState(insp).st === 'done';
     $('#sum-out').innerHTML = `
-      <div class="overall" style="background:${o.rating.color};color:${o.rating.fg}"><div>Score global</div><b>${fmtPct(o.pct)}</b><span>${o.pct === null ? 'Pas encore noté' : rName(o.rating)}</span>
-        <div class="small">${o.countedThemes}/19 thèmes notés</div></div>
+      <div class="sum-hero">
+        <div class="score-ring ${firstDraw && o.pct !== null ? 'fill' : ''}" style="--p:${pc};--rc:${ringC}" role="img" aria-label="Score global ${fmtPct(o.pct)}"><div><b>${o.pct === null ? '—' : String(pc).replace('.', ',')}${o.pct === null ? '' : '<small> %</small>'}</b><span>score global</span></div></div>
+        <div class="sum-id"><span class="chip ${tnCls(o.pct)}">${o.pct === null ? 'Pas encore noté' : rName(o.rating)}</span><b>${esc(auditLabel(insp, subs))}</b><span class="muted">${[insp.zone ? esc(insp.zone) : '', dateFR(insp.date), `${o.countedThemes} / 19 thèmes notés`].filter(Boolean).join('<br>')}</span></div>
+      </div>
+      ${done && fnName ? `<div class="sum-thanks">${ic('check', 18)} Audit complet, merci ${esc(fnName)}.</div>` : ''}
       <div class="sum-list">${o.themes.map(t => {
         const w = t.pct === null ? 0 : Math.round(t.pct * 100), r = rating(t.pct);
         return `<a class="sum-row" href="#/insp/${id}/t/${t.theme.ref}">
           <span class="sum-n">${t.theme.ref.replace('.0', '')}</span>
           <span class="sum-main"><b>${esc(t.theme.name)}</b>
             <span class="sum-bar">${t.pct === null ? '' : `<i style="width:${w}%;background:${r.color}"></i>`}</span></span>
-          ${t.pct === null ? `<span class="sum-na">${t.total && t.done === t.total ? 'N/A' : '—'}</span>` : `<span class="badge" style="background:${r.color};color:${r.fg}">${w}%</span>`}</a>`;
+          ${t.pct === null ? `<span class="sum-na">${t.total && t.done === t.total ? 'N/A' : '—'}</span>` : `<span class="badge ${tnCls(t.pct)}">${w}%</span>`}</a>`;
       }).join('')}</div>`;
   };
-  draw();
+  draw(); firstDraw = false;
+  const big = view.querySelector('.score-ring.fill b');
+  if (big && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    const target = parseFloat(big.firstChild.textContent.replace(',', '.')), t0 = performance.now(), D = 1100;
+    const ease = t => 1 - Math.pow(1 - t, 4);
+    const step = now => { const t = Math.min(1, (now - t0) / D); big.firstChild.textContent = String(Math.round(target * ease(t) * 10) / 10).replace('.', ','); if (t < 1 && big.isConnected) requestAnimationFrame(step); };
+    requestAnimationFrame(step);
+  }
   view.addEventListener('input', e => {
     const k = e.target.dataset.k; if (!k) return;
     insp[k] = (k === 'bonus' || k === 'penalty') ? (parseFloat(e.target.value.replace(',', '.')) || 0) : e.target.value;
@@ -2939,6 +2995,7 @@ function drawSideFoot() {
     <span class="side-ver">${esc(BRAND.name)} · v${APP_VERSION}</span>` : '';
   f.querySelector('.side-proj')?.addEventListener('click', () => projectSheet());
 }
+let lastPath = null;
 async function render() {
   const seq = ++renderSeq;
   cleanups.forEach(f => { try { f(); } catch { /* ignore */ } }); cleanups = [];
@@ -2958,6 +3015,8 @@ async function render() {
       const args = m.slice(1);
       await (args.length ? fn(...args, q) : fn(q));
       if (seq === renderSeq && fresh.querySelector('[list="hse-list"]')) fillHseList();
+      if (seq === renderSeq && path !== lastPath && !matchMedia('(prefers-reduced-motion: reduce)').matches) fresh.animate?.([{ opacity: 0.35 }, { opacity: 1 }], { duration: 170, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' });
+      lastPath = path;
     } catch (err) { console.error(err); if (seq === renderSeq) fresh.innerHTML = `<div class="empty">Erreur : ${esc(err.message)}</div>`; }
     window.scrollTo(0, 0);
     return;

@@ -960,3 +960,4 @@ a:focus-visible, button:focus-visible, summary:focus-visible, label:focus-visibl
   #topbar { padding-left: max(8px, env(safe-area-inset-left)); padding-right: max(8px, env(safe-area-inset-right)); }
   #tabbar { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
 }
+.chip.sub { display: inline-block; max-width: 55%; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }

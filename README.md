@@ -59,6 +59,12 @@ Les téléphones qui avaient déjà l'app **gardent** leur plan et leurs audits 
 
 ⚠️ Un fichier supprimé d'un dépôt GitHub public reste visible dans son **historique**. Pour effacer complètement l'ancien plan : supprimer le dépôt, le recréer **avec le même nom**, y envoyer ce zip, puis réactiver GitHub Pages. L'adresse de l'app ne change pas et les données des téléphones sont conservées.
 
+## Nouveautés v4.0 — nouveau style « Premium sobre »
+- Police IBM Plex Sans intégrée (hors ligne), palette sobre, une seule couleur forte (bleu JDN), échelles de texte/arrondis/ombres.
+- Accueil : « Bonjour + prénom », carte « pouls du chantier » (score moyen 30 j, tendance, courbe 8 semaines), entreprises en liste groupée.
+- Notation : contrôle segmenté, couleur douce de la note choisie. Résumé : anneau du score qui se remplit, « merci » quand l'audit est complet.
+- Style dans css/v4.css (chargé après app.css) : le retirer de index.html rend l'ancien style.
+
 ## Nouveautés v3.16 (audit design Apple / Vercel / Refactoring UI)
 - Accueil : pastille « En cours » claire, « 3 actions » / « 2 en retard » écrit en clair.
 - Contrastes : pastilles d'entreprise et épingles toujours lisibles (couleur assombrie si besoin), « PRESTATAIRE » plus foncé.
