@@ -234,3 +234,18 @@ label.f { font-weight: 500; font-size: 14px; color: var(--muted); }
 
 /* notation : la couleur glisse au toucher (instantané, juste adouci) */
 .scores button { transition: transform 120ms var(--ease-out), background-color 140ms ease, color 140ms ease, box-shadow 140ms ease; }
+
+/* ---------- PC (≥ 1024 px) : barre latérale bleue, barre du haut claire ---------- */
+@media (min-width: 1024px) {
+  #tabbar { background: var(--brand); -webkit-backdrop-filter: none; backdrop-filter: none; border-top: 0; border-right: 1px solid rgba(255,255,255,.08); }
+  :root[data-theme="dark"] #tabbar { background: #0E1A2E; border-right: 1px solid var(--line); }
+  #tabbar a, :root[data-theme="dark"] #tabbar a { color: rgba(255,255,255,.78); font-size: 15px; font-weight: 500; }
+  #tabbar a:hover { background: rgba(255,255,255,.08); color: #fff; }
+  #tabbar a.on, :root[data-theme="dark"] #tabbar a.on { background: rgba(255,255,255,.14); color: #fff; font-weight: 600; }
+  #topbar, :root[data-theme="dark"] #topbar { background: color-mix(in srgb, var(--bg) 90%, transparent); -webkit-backdrop-filter: saturate(1.6) blur(18px); backdrop-filter: saturate(1.6) blur(18px); color: var(--ink); border-bottom: 1px solid var(--line); }
+  #title small { color: var(--muted); }
+  #topbar .icon-btn { background: var(--surface); color: var(--brand); box-shadow: var(--sh-1); }
+  :root[data-theme="dark"] #topbar .icon-btn { background: var(--surface-2); color: var(--brand-2); }
+  #topbar .icon-btn:active { background: var(--surface-2); }
+  .home-hero { border-radius: var(--r-l); }
+}
