@@ -272,3 +272,9 @@ label.f { font-weight: 500; font-size: 14px; color: var(--muted); }
 /* zones sur la photo aérienne : trait plus épais et plus clair pour bien les voir au soleil */
 .pv-area.k-zone { stroke-width: 3.5px; stroke-dasharray: 9 5; stroke-opacity: 1; fill-opacity: .16; }
 .pv-area.k-sel { stroke-width: 4px; }
+
+/* onglets segmentés : l'onglet actif est rempli en bleu, la différence se voit au premier coup d'œil (même au soleil) */
+.seg button.on, .tabs3 button.on, .tabs3 a.on { background: var(--brand); color: #fff; box-shadow: 0 1px 2px rgba(11,45,91,.3), 0 4px 10px rgba(11,45,91,.18); }
+.seg button.on .muted, .seg button.on small, .tabs3 .on small, .tabs3 .on .muted { color: rgba(255,255,255,.8); }
+:root[data-theme="dark"] .seg button.on, :root[data-theme="dark"] .tabs3 button.on, :root[data-theme="dark"] .tabs3 a.on { background: #2563C9; color: #fff; }
+.seg button:not(.on), .tabs3 button:not(.on), .tabs3 a:not(.on) { color: var(--muted); }
