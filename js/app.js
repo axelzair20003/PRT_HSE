@@ -10,7 +10,7 @@ import { SEED_SUBS, SEED_LOCATIONS, SEED_PLAN, SEED_SITE, SEED_PROJECT, loadSeed
 import { CRIT_FR, THEME_FR, TXT as RTXT, RATING_FR, RANGE_FR } from './report-fr.js';
 import { REPORT_DEFAULTS, REPORT_TITLES, buildXLSX, buildPDF, shareFile, download, canShareFile, actionRef } from './export.js';
 
-export const APP_VERSION = '4.0.7';
+export const APP_VERSION = '4.0.8';
 
 // ---------- utilitaires ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -1795,7 +1795,9 @@ async function vAction(id) {
     });
   });
   const readOnly = !cloud.can('actions') || !isMine(a);
-  if ($('#del')) $('#del').onclick = async () => { if (await confirmBox('Supprimer cette action ?', '')) { await db.remove('actions', id); history.back(); } };
+  // après suppression : retour à la liste des actions (history.back() ne faisait rien quand l'action
+  // avait été ouverte directement, l'écran restait sur l'action supprimée)
+  if ($('#del')) $('#del').onclick = async () => { if (await confirmBox('Supprimer cette action ?', 'Elle disparaîtra de la liste et des rapports.', 'Supprimer')) { await db.remove('actions', id); toast('Action supprimée'); location.replace('#/actions'); } };
 
   if (a.planId && plans[a.planId]) {
     let moving = false;
