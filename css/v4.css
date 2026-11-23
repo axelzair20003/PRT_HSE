@@ -286,3 +286,18 @@ label.f { font-weight: 500; font-size: 14px; color: var(--muted); }
 :root[data-theme="dark"] .seg button:not(.on), :root[data-theme="dark"] .tabs3 button:not(.on), :root[data-theme="dark"] .tabs3 a:not(.on) { background: var(--surface-2); color: var(--brand-2); box-shadow: inset 0 0 0 1px var(--line-2); }
 .seg button, .tabs3 button, .tabs3 a { border-radius: 12px; min-height: 46px; }
 .seg button:not(.on) .muted, .seg button:not(.on) small, .tabs3 :not(.on) small { color: var(--muted); }
+
+/* projet : la ligne d'un plan passe sur 2 lignes sur téléphone (nom lisible, boutons dessous) */
+.plan-row { flex-wrap: wrap; }
+.plan-row input.in { flex: 1 1 160px; min-width: 0; }
+
+/* notation : la note choisie en COULEUR PLEINE — se voit d'un coup d'œil en plein soleil
+   (rouge 0-1, orange 2, jaune 3, vert 4, vert foncé 5, bleu N/A ; textes à contraste ≥ 4,5:1) */
+.scores button.on { font-weight: 700; box-shadow: 0 1px 2px rgba(15,27,45,.25), 0 4px 10px rgba(15,27,45,.18) !important; }
+.scores button.on[data-v="0"], .scores button.on[data-v="1"],
+:root[data-theme="dark"] .scores button.on[data-v="0"], :root[data-theme="dark"] .scores button.on[data-v="1"] { background: #C62828; color: #fff; }
+.scores button.on[data-v="2"], :root[data-theme="dark"] .scores button.on[data-v="2"] { background: #EF7B10; color: #1F1300; }
+.scores button.on[data-v="3"], :root[data-theme="dark"] .scores button.on[data-v="3"] { background: #F2B705; color: #1F1700; }
+.scores button.on[data-v="4"], :root[data-theme="dark"] .scores button.on[data-v="4"] { background: #2E7D32; color: #fff; }
+.scores button.on[data-v="5"], :root[data-theme="dark"] .scores button.on[data-v="5"] { background: #1B5E20; color: #fff; }
+.scores button.on[data-v="NA"], :root[data-theme="dark"] .scores button.on[data-v="NA"] { background: var(--brand); color: #fff; }

@@ -10,7 +10,7 @@ import { SEED_SUBS, SEED_LOCATIONS, SEED_PLAN, SEED_SITE, SEED_PROJECT, loadSeed
 import { CRIT_FR, THEME_FR, TXT as RTXT, RATING_FR, RANGE_FR } from './report-fr.js';
 import { REPORT_DEFAULTS, REPORT_TITLES, buildXLSX, buildPDF, shareFile, download, canShareFile, actionRef } from './export.js';
 
-export const APP_VERSION = '4.0.6';
+export const APP_VERSION = '4.0.7';
 
 // ---------- utilitaires ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -526,7 +526,7 @@ async function vHome() {
     </section>
     ${resume}
     ${cloud.can('audit') ? `<a class="btn primary big new-audit" href="#/start">${ic('plus')}<span>Nouvel audit<small>zone, une ou plusieurs entreprises</small></span></a>` : ''}
-    ${pulseCard(insps, month, avgPct, late.length, openActs)}
+    ${insps.length ? pulseCard(insps, month, avgPct, late.length, openActs) : ''}
     <div class="home-cols"><div class="home-main">
     <div class="section-head"><span>Audit rapide</span>${nActive ? `<span class="muted small">${nActive} entreprise${nActive > 1 ? 's' : ''}</span>` : ''}</div>
     ${cloud.can('audit') ? (subList.some(s => !s.archived) ? subGrid(subList, insps, acts) : noCompanyCard()) : '<div class="card muted">Votre accès ne permet pas de lancer des audits. Contactez l’administrateur HSE.</div>'}
@@ -554,11 +554,13 @@ async function vHome() {
 
 /** Projet encore sans entreprise : on explique et on propose de les choisir tout de suite */
 function noCompanyCard() {
-  return `<div class="card empty-proj"><b>Aucune entreprise dans ${esc(PROJECT?.name || 'ce projet')}</b>
-    <p class="muted small">${cloud.isAdmin() ? 'Choisissez dans l’annuaire les entreprises qui travaillent sur ce projet.' : 'L’administrateur HSE doit d’abord ajouter les entreprises de ce projet.'}</p>
-    ${cloud.isAdmin() ? `<button class="btn primary block" id="pick-comp">${ic('plus')} Ajouter des entreprises</button>` : ''}
-    ${cloud.enabled ? '' : `<label class="btn block" style="margin-top:10px">${ic('upload')} Importer un kit de démarrage<input type="file" accept="application/json,.json" class="hidden-input" id="kit-in"></label>
-    <p class="muted small" style="margin:8px 0 0">Fichier .json reçu de votre responsable HSE : projet, plan et entreprises déjà prêts.</p>`}</div>`;
+  // app vierge sur le téléphone d'un nouvel HSE : le kit reçu est le chemin le plus simple → bouton principal
+  const kit = !cloud.enabled;
+  return `<div class="card empty-proj"><b>${kit ? 'Bienvenue dans Audit HSE' : `Aucune entreprise dans ${esc(PROJECT?.name || 'ce projet')}`}</b>
+    ${kit ? `<p class="muted small">Vous avez reçu un fichier « kit de démarrage » (.json) ? Importez-le : projet, plan et entreprises seront prêts.</p>
+    <label class="btn primary block">${ic('upload')} Importer le kit de démarrage<input type="file" accept="application/json,.json" class="hidden-input" id="kit-in"></label>` : ''}
+    <p class="muted small" style="margin:${kit ? '14px' : '0'} 0 8px">${cloud.isAdmin() ? (kit ? 'Sinon, choisissez vous-même les entreprises qui travaillent sur ce projet.' : 'Choisissez dans l’annuaire les entreprises qui travaillent sur ce projet.') : 'L’administrateur HSE doit d’abord ajouter les entreprises de ce projet.'}</p>
+    ${cloud.isAdmin() ? `<button class="btn ${kit ? '' : 'primary '}block" id="pick-comp">${ic('plus')} Ajouter des entreprises</button>` : ''}</div>`;
 }
 async function pickProjectCompanies() {
   const { allSubs } = await maps();
