@@ -59,6 +59,11 @@ Les téléphones qui avaient déjà l'app **gardent** leur plan et leurs audits 
 
 ⚠️ Un fichier supprimé d'un dépôt GitHub public reste visible dans son **historique**. Pour effacer complètement l'ancien plan : supprimer le dépôt, le recréer **avec le même nom**, y envoyer ce zip, puis réactiver GitHub Pages. L'adresse de l'app ne change pas et les données des téléphones sont conservées.
 
+## Nouveautés v4.1 — mode équipe activé
+- Connexion obligatoire : chaque personne entre avec son lien d'invitation personnel (code secret), puis email + mot de passe.
+- Le serveur date lui-même chaque envoi : un audit fait hors ligne et envoyé plus tard arrive bien chez tout le monde.
+- Sécurité renforcée : fonctions de contrôle dans un schéma privé, aucun accès sans compte, test d'intrusion (23 tentatives bloquées), 0 alerte de sécurité Supabase.
+
 ## Nouveautés v4.0 — nouveau style « Premium sobre »
 - Police IBM Plex Sans intégrée (hors ligne), palette sobre, une seule couleur forte (bleu JDN), échelles de texte/arrondis/ombres.
 - Accueil : « Bonjour + prénom », carte « pouls du chantier » (score moyen 30 j, tendance, courbe 8 semaines), entreprises en liste groupée.
@@ -146,7 +151,7 @@ Une fois configurée :
    export const CLOUD = { url: 'https://abcd1234.supabase.co', anonKey: 'sb_publishable_…' };
    ```
    puis changer `CACHE` dans `sw.js` (ex. `prt-hse-v2.0.1`) → *Commit changes*.
-6. **L'admin HSE crée son compte TOUT DE SUITE après l'étape 2** (son invitation n'a pas de code : il faut fermer cette porte au plus vite) : ouvrir l'app → *Créer mon compte* avec son email → il est administrateur et envoie les entreprises et le plan au serveur.
+6. **L'admin HSE crée son compte** avec son lien personnel `#/join?e=EMAIL&c=CODE` (code lu par `select code from invites;`) → il est administrateur et envoie les entreprises et le plan au serveur.
 7. **Inviter l'équipe** : Réglages → **Équipe et invitations** → nom + email → *Inviter* → envoyer le message à la personne. Le lien contient son **code d'invitation personnel** : sans lui, personne d'autre ne peut créer le compte à son adresse.
 
 ### Au quotidien

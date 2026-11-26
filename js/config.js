@@ -3,6 +3,6 @@
 // Renseigner = connexion obligatoire, données centralisées, l'admin HSE voit tout.
 // Ces deux valeurs sont publiques par nature : la sécurité est assurée par le serveur (RLS).
 export const CLOUD = {
-  url: '',      // ex. 'https://abcdefghijkl.supabase.co'  (Project Settings → API → Project URL)
-  anonKey: '',  // clé « publishable » ou « anon public »   (Project Settings → API Keys)
+  url: 'https://gumkyisjdvxpixfbllrj.supabase.co',      // ex. 'https://abcdefghijkl.supabase.co'  (Project Settings → API → Project URL)
+  anonKey: 'sb_publishable_s-I5u-hfXcredF7Ia_Xp4A_OD74XPeX',  // clé « publishable » ou « anon public »   (Project Settings → API Keys)
 };

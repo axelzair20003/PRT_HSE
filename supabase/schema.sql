@@ -54,32 +54,36 @@ alter table public.docs add constraint docs_kind_check check (kind in ('inspecti
 create index if not exists docs_updated_idx on public.docs (updated_at);
 create index if not exists docs_owner_idx on public.docs (owner);
 
--- ---------- Fonctions de rôle ----------
-create or replace function public.is_admin() returns boolean
+-- ---------- Fonctions de rôle (schéma privé, non exposé par l'API) ----------
+create schema if not exists app_private;
+revoke all on schema app_private from public, anon;
+grant usage on schema app_private to authenticated;
+
+create or replace function app_private.is_admin() returns boolean
 language sql stable security definer set search_path = public as $$
   select exists (select 1 from profiles where id = auth.uid() and role = 'admin' and active);
 $$;
 
 -- projet autorisé pour l'utilisateur connecté (liste vide/nulle = tous)
-create or replace function public.can_project(p text) returns boolean
+create or replace function app_private.can_project(p text) returns boolean
 language sql stable security definer set search_path = public as $$
   select exists (select 1 from profiles where id = auth.uid() and active
     and (role = 'admin' or projects is null or cardinality(projects) = 0 or p is null or p = any(projects)));
 $$;
 
 -- droit accordé par l'administrateur (les droits « aperçu équipe » et « actions des autres » sont décochés par défaut)
-create or replace function public.has_perm(p text) returns boolean
+create or replace function app_private.has_perm(p text) returns boolean
 language sql stable security definer set search_path = public as $$
   select exists (select 1 from profiles where id = auth.uid() and active and coalesce((perms ->> p)::boolean, false));
 $$;
 
-create or replace function public.is_active() returns boolean
+create or replace function app_private.is_active() returns boolean
 language sql stable security definer set search_path = public as $$
   select exists (select 1 from profiles where id = auth.uid() and active);
 $$;
 
 -- ---------- Inscription réservée aux invités ----------
-create or replace function public.handle_new_user() returns trigger
+create or replace function app_private.handle_new_user() returns trigger
 language plpgsql security definer set search_path = public as $$
 declare inv invites;
 begin
@@ -99,7 +103,7 @@ $$;
 drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created
   after insert on auth.users
-  for each row execute function public.handle_new_user();
+  for each row execute function app_private.handle_new_user();
 
 -- ---------- Sécurité (Row Level Security) ----------
 alter table public.invites  enable row level security;
@@ -108,41 +112,41 @@ alter table public.docs     enable row level security;
 
 drop policy if exists "invites: admin" on public.invites;
 create policy "invites: admin" on public.invites
-  for all using (public.is_admin()) with check (public.is_admin());
+  for all using (app_private.is_admin()) with check (app_private.is_admin());
 
 drop policy if exists "profiles: lecture" on public.profiles;
 create policy "profiles: lecture" on public.profiles
-  for select using (id = auth.uid() or public.is_admin());
+  for select using (id = auth.uid() or app_private.is_admin());
 
 drop policy if exists "profiles: admin modifie" on public.profiles;
 create policy "profiles: admin modifie" on public.profiles
-  for update using (public.is_admin()) with check (public.is_admin());
+  for update using (app_private.is_admin()) with check (app_private.is_admin());
 
 drop policy if exists "docs: lecture" on public.docs;
 create policy "docs: lecture" on public.docs
   for select using (
-    public.is_active() and (
-      kind = 'sub' or owner = auth.uid() or public.is_admin()
+    app_private.is_active() and (
+      kind = 'sub' or owner = auth.uid() or app_private.is_admin()
       -- plans et projets : seulement ceux des projets autorisés
-      or (kind in ('plan', 'project') and public.can_project(project))
+      or (kind in ('plan', 'project') and app_private.can_project(project))
       -- aperçu des audits de l'équipe (date, zone, entreprise, score — sans le détail)
-      or (kind = 'summary' and public.has_perm('team') and public.can_project(project))
+      or (kind = 'summary' and app_private.has_perm('team') and app_private.can_project(project))
       -- actions relevées par les autres HSE (l'app n'affiche que celles encore ouvertes)
-      or (kind = 'action' and public.has_perm('teamActions') and public.can_project(project))
+      or (kind = 'action' and app_private.has_perm('teamActions') and app_private.can_project(project))
     )
   );
 
 drop policy if exists "docs: création" on public.docs;
 create policy "docs: création" on public.docs
   for insert with check (
-    public.is_active() and ((kind in ('inspection', 'action', 'summary') and owner = auth.uid() and public.can_project(project)) or public.is_admin())
+    app_private.is_active() and ((kind in ('inspection', 'action', 'summary') and owner = auth.uid() and app_private.can_project(project)) or app_private.is_admin())
   );
 
 drop policy if exists "docs: modification" on public.docs;
 create policy "docs: modification" on public.docs
   for update
-  using (public.is_active() and ((kind in ('inspection', 'action', 'summary') and owner = auth.uid()) or public.is_admin()))
-  with check (public.is_active() and ((kind in ('inspection', 'action', 'summary') and owner = auth.uid() and public.can_project(project)) or public.is_admin()));
+  using (app_private.is_active() and ((kind in ('inspection', 'action', 'summary') and owner = auth.uid()) or app_private.is_admin()))
+  with check (app_private.is_active() and ((kind in ('inspection', 'action', 'summary') and owner = auth.uid() and app_private.can_project(project)) or app_private.is_admin()));
 -- pas de suppression physique : l'app marque deleted = true
 
 -- ---------- Stockage des fichiers ----------
@@ -152,44 +156,65 @@ on conflict (id) do nothing;
 
 drop policy if exists "photos: lecture" on storage.objects;
 create policy "photos: lecture" on storage.objects for select
-  using (bucket_id = 'photos' and (public.is_admin() or (storage.foldername(name))[1] = auth.uid()::text));
+  using (bucket_id = 'photos' and (app_private.is_admin() or (storage.foldername(name))[1] = auth.uid()::text));
 
 drop policy if exists "photos: envoi" on storage.objects;
 create policy "photos: envoi" on storage.objects for insert
-  with check (bucket_id = 'photos' and public.is_active() and ((storage.foldername(name))[1] = auth.uid()::text or public.is_admin()));
+  with check (bucket_id = 'photos' and app_private.is_active() and ((storage.foldername(name))[1] = auth.uid()::text or app_private.is_admin()));
 
 -- photos des actions encore ouvertes des autres HSE (droit « Actions des autres »)
 drop policy if exists "photos: actions des autres" on storage.objects;
 create policy "photos: actions des autres" on storage.objects for select
-  using (bucket_id = 'photos' and public.is_active() and public.has_perm('teamActions') and exists (
+  using (bucket_id = 'photos' and app_private.is_active() and app_private.has_perm('teamActions') and exists (
     select 1 from public.docs d
-    where d.kind = 'action' and not d.deleted and public.can_project(d.project)
+    where d.kind = 'action' and not d.deleted and app_private.can_project(d.project)
       and d.owner::text = (storage.foldername(name))[1]
       and (d.data -> 'photos') ? storage.filename(name)));
 
 -- suppression : chacun ses photos (l'admin toutes), pour ne pas payer le stockage de photos effacées
 drop policy if exists "photos: suppression" on storage.objects;
 create policy "photos: suppression" on storage.objects for delete
-  using (bucket_id = 'photos' and ((storage.foldername(name))[1] = auth.uid()::text or public.is_admin()));
+  using (bucket_id = 'photos' and ((storage.foldername(name))[1] = auth.uid()::text or app_private.is_admin()));
 
 drop policy if exists "photos: remplacement" on storage.objects;
 create policy "photos: remplacement" on storage.objects for update
-  using (bucket_id = 'photos' and ((storage.foldername(name))[1] = auth.uid()::text or public.is_admin()));
+  using (bucket_id = 'photos' and ((storage.foldername(name))[1] = auth.uid()::text or app_private.is_admin()));
 
 drop policy if exists "shared: lecture" on storage.objects;
 create policy "shared: lecture" on storage.objects for select
-  using (bucket_id = 'shared' and public.is_active());
+  using (bucket_id = 'shared' and app_private.is_active());
 
 drop policy if exists "shared: admin envoi" on storage.objects;
 create policy "shared: admin envoi" on storage.objects for insert
-  with check (bucket_id = 'shared' and public.is_admin());
+  with check (bucket_id = 'shared' and app_private.is_admin());
 
 drop policy if exists "shared: admin remplacement" on storage.objects;
 create policy "shared: admin remplacement" on storage.objects for update
-  using (bucket_id = 'shared' and public.is_admin());
+  using (bucket_id = 'shared' and app_private.is_admin());
+
+-- ---------- Date d'envoi fixée par le serveur ----------
+-- (un audit fait hors ligne puis envoyé plus tard doit quand même arriver chez les autres)
+create or replace function app_private.set_updated_at() returns trigger
+language plpgsql set search_path = public as $$
+begin new.updated_at := now(); return new; end;
+$$;
+drop trigger if exists docs_updated_at on public.docs;
+create trigger docs_updated_at before insert or update on public.docs
+  for each row execute function app_private.set_updated_at();
+
+-- ---------- Droits d'accès à l'API (en plus des règles RLS) ----------
+revoke all on public.invites, public.profiles, public.docs from anon, authenticated;
+grant select, insert, update, delete on public.invites to authenticated;
+grant select, update on public.profiles to authenticated;
+grant select, insert, update on public.docs to authenticated;
+revoke execute on function app_private.handle_new_user() from public, anon, authenticated;
+revoke execute on function app_private.set_updated_at() from public, anon, authenticated;
+revoke execute on function app_private.is_admin(), app_private.can_project(text), app_private.has_perm(text), app_private.is_active() from public, anon;
+grant execute on function app_private.is_admin(), app_private.can_project(text), app_private.has_perm(text), app_private.is_active() to authenticated;
 
 -- ---------- Premier administrateur ----------
--- (pas de code pour ce premier compte : l'admin HSE doit créer son compte JUSTE APRÈS avoir lancé ce script)
-insert into public.invites (email, name, role, code)
-values (lower('ADRESSE-EMAIL-ADMIN@exemple.com'), 'Admin HSE', 'admin', null)   -- ⚠️ à remplacer
+-- L'admin reçoit lui aussi un code personnel : personne d'autre ne peut créer son compte à sa place.
+-- Après ce script : select code from invites where email = '...';  puis lui envoyer le lien #/join?e=…&c=CODE
+insert into public.invites (email, name, role)
+values (lower('ADRESSE-EMAIL-ADMIN@exemple.com'), 'Admin HSE', 'admin')   -- ⚠️ à remplacer
 on conflict (email) do update set role = 'admin';
