@@ -10,7 +10,7 @@ import { SEED_SUBS, SEED_LOCATIONS, SEED_PLAN, SEED_SITE, SEED_PROJECT, loadSeed
 import { CRIT_FR, THEME_FR, TXT as RTXT, RATING_FR, RANGE_FR } from './report-fr.js';
 import { REPORT_DEFAULTS, REPORT_TITLES, buildXLSX, buildPDF, shareFile, download, canShareFile, actionRef } from './export.js';
 
-export const APP_VERSION = '4.1.0';
+export const APP_VERSION = '4.1.1';
 
 // ---------- utilitaires ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -3165,6 +3165,7 @@ function showLogin() {
   document.body.classList.add('login-mode');
   const join = location.hash.startsWith('#/join') ? new URLSearchParams(location.hash.split('?')[1] || '') : null;
   let mode = join ? 'up' : 'in';
+  let invited = !!join?.get('c');   // le code ne s'affiche que pour les invités (lien reçu) ; les admins créent juste un mot de passe
   const label = () => mode === 'up' ? 'Créer mon compte' : 'Se connecter';
   const draw = () => {
     view.innerHTML = `
@@ -3174,16 +3175,18 @@ function showLogin() {
         <p class="muted">Inspections HSE · Site HSE Performance Rating</p>
         <div class="tabs3 two"><button type="button" data-m="in" class="${mode === 'in' ? 'on' : ''}">Se connecter</button><button type="button" data-m="up" class="${mode === 'up' ? 'on' : ''}">Créer mon compte</button></div>
         <form id="lf" autocomplete="on">
-          ${mode === 'up' ? '<label class="f">Nom et prénom</label><input class="in" id="l-name" autocomplete="name" required>' : ''}
-          ${mode === 'up' ? '<label class="f">Code d’invitation <span class="muted small">(dans le message reçu)</span></label><input class="in" id="l-code" autocomplete="off" autocapitalize="characters" spellcheck="false">' : ''}
+          ${mode === 'up' ? `<div id="l-inv"${invited ? '' : ' hidden'}><label class="f" for="l-name">Nom et prénom</label><input class="in" id="l-name" autocomplete="name">
+          <label class="f" for="l-code">Code d’invitation <span class="muted small">(dans le message reçu)</span></label><input class="in" id="l-code" autocomplete="off" autocapitalize="characters" spellcheck="false"></div>` : ''}
           <label class="f">Email professionnel</label><input class="in" id="l-mail" type="email" inputmode="email" autocomplete="username" required>
-          <label class="f">Mot de passe</label><input class="in" id="l-pass" type="password" autocomplete="${mode === 'up' ? 'new-password' : 'current-password'}" minlength="8" required>
+          <label class="f">${mode === 'up' ? 'Choisissez un mot de passe' : 'Mot de passe'}</label><input class="in" id="l-pass" type="password" autocomplete="${mode === 'up' ? 'new-password' : 'current-password'}" minlength="8" required>
           <p class="login-err" id="l-err"></p>
           <button class="btn primary big" id="l-go">${label()}</button>
         </form>
-        <p class="muted small login-foot">${mode === 'up' ? 'Réservé aux adresses invitées par l’administrateur HSE.' : 'Accès sur invitation · une seule connexion par téléphone.'}</p>
+        ${mode === 'up' && !invited ? '<button type="button" class="btn ghost small" id="l-hascode" style="margin-top:16px">J’ai reçu un code d’invitation</button>' : ''}
+        <p class="muted small login-foot">${mode === 'up' ? 'Réservé aux adresses autorisées par l’administrateur HSE.' : 'Accès sur invitation · une seule connexion par téléphone.'}</p>
       </div>`;
     view.querySelector('.tabs3').onclick = e => { const b = e.target.closest('[data-m]'); if (b) { mode = b.dataset.m; draw(); } };
+    if ($('#l-hascode')) $('#l-hascode').onclick = () => { invited = true; $('#l-inv').hidden = false; $('#l-hascode').remove(); $('#l-name').focus(); };
     $('#lf').onsubmit = async e => {
       e.preventDefault();
       const btn = $('#l-go'); btn.disabled = true; btn.textContent = 'Connexion…'; $('#l-err').textContent = '';
