@@ -10,7 +10,7 @@ import { SEED_SUBS, SEED_LOCATIONS, SEED_PLAN, SEED_SITE, SEED_PROJECT, loadSeed
 import { CRIT_FR, THEME_FR, TXT as RTXT, RATING_FR, RANGE_FR } from './report-fr.js';
 import { REPORT_DEFAULTS, REPORT_TITLES, buildXLSX, buildPDF, shareFile, download, canShareFile, actionRef } from './export.js';
 
-export const APP_VERSION = '4.2.0';
+export const APP_VERSION = '4.3.0';
 
 // ---------- utilitaires ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -465,6 +465,44 @@ async function resumeCard(subs) {
   return `<a class="resume-card" href="#/insp/${i.id}${th ? '/t/' + th.ref : ''}"><span class="mini-ring" style="--p:${pc}" aria-hidden="true"><span>${pc}%</span></span><span><b>Reprendre l’audit en cours</b><small>${what} · ${meta}${th ? ` · thème ${th.ref.split('.')[0]}` : ''}</small></span>${ic('chevron', 20)}</a>`;
 }
 /** « Pouls du chantier » : score moyen 30 j, tendance, courbe des 8 dernières semaines */
+/** Pastille rouge sur l'onglet Actions : mes actions en retard */
+async function lateBadge() {
+  const me = cloud.enabled ? cloud.uid() : null;
+  const n = (await db.all('actions')).filter(a => !a.deleted && isLate(a) && (!me || cloud.isAdmin() || !a.owner || a.owner === me)).length;
+  document.querySelectorAll('#tabbar a[data-tab="actions"]').forEach(t => {
+    let b = t.querySelector('.tab-badge');
+    if (!n) { b?.remove(); t.removeAttribute('aria-label'); return; }
+    if (!b) { b = document.createElement('i'); b.className = 'tab-badge'; b.setAttribute('aria-hidden', 'true'); t.appendChild(b); }
+    b.textContent = n > 99 ? '99+' : n;
+    t.setAttribute('aria-label', `Actions, ${n} en retard`);
+  });
+}
+/** Admin : qui a audité cette semaine, et qui n'a rien envoyé depuis plus de 7 jours */
+async function teamWeekCard() {
+  const prof = await db.getMeta('profiles', {});
+  const people = Object.entries(prof).filter(([, p]) => p.active !== false && (p.audit || p.role === 'admin'));
+  if (!people.length) return '';
+  const all = (await db.all('inspections')).filter(i => !i.deleted);
+  const d = new Date(); d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  const monday = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const today = todayISO();
+  const rows = people.map(([id, p]) => {
+    const mine = all.filter(i => i.owner === id);
+    const last = mine.reduce((m, i) => (i.date > m ? i.date : m), '');
+    const days = last ? Math.round((new Date(today) - new Date(last)) / 864e5) : null;
+    if (p.role === 'admin' && !mine.length) return null;   // un admin qui n'audite pas n'est pas « inactif »
+    return { id, name: p.name || p.email, week: mine.filter(i => i.date >= monday).length, days, idle: days === null || days > 7 };
+  }).filter(Boolean).sort((a, b) => b.week - a.week || (a.days ?? 1e9) - (b.days ?? 1e9));
+  const ini = n => esc((n || '?').split(/[\s.@]+/).filter(Boolean).map(w => w[0]).join('').slice(0, 2).toUpperCase());
+  const when = r => r.days === null ? 'aucun audit envoyé' : r.days === 0 ? 'dernier audit aujourd’hui' : r.days === 1 ? 'dernier audit hier' : `rien depuis ${r.days} jours`;
+  if (!rows.length) return '';
+  const nIdle = rows.filter(r => r.idle).length;
+  return `<div class="section-head"><span>Équipe cette semaine</span>${nIdle ? `<span class="tw-warn">${nIdle} sans audit depuis 7 j</span>` : '<span class="muted small">tout le monde est actif</span>'}</div>
+    <div class="card team-week" id="team-week">${rows.map(r => `<a class="tw-row" href="#/member/${esc(r.id)}">
+      <span class="tw-av">${ini(r.name)}</span>
+      <span class="grow"><b class="ellip">${esc(r.name)}</b><small class="${r.idle ? 'tw-idle' : 'muted'}">${when(r)}</small></span>
+      <span class="tw-n"><b>${r.week}</b><small>audit${r.week > 1 ? 's' : ''}</small></span>${ic('chevron', 18)}</a>`).join('')}</div>`;
+}
 function pulseCard(insps, month, avgPct, nLate, nOpen) {
   const DAY = 864e5, now = Date.now();
   const pctOf = i => overallScore(i.scores, i.bonus, i.penalty).pct;
@@ -511,6 +549,8 @@ async function vHome() {
   const fn = await firstName();
   const hello = new Date().getHours() >= 18 ? 'Bonsoir' : 'Bonjour';
   const nActive = subList.filter(s => !s.archived).length;
+  const teamAdmin = cloud.enabled && cloud.isAdmin();
+  const teamCard = teamAdmin ? await teamWeekCard() : '';
   view.classList.add('v-home');
   view.innerHTML = `
     ${cloud.enabled ? '<button class="sync-pill" id="sync-now" hidden></button>' : ''}
@@ -532,6 +572,7 @@ async function vHome() {
     ${resume}
     ${cloud.can('audit') ? `<a class="btn primary big new-audit" href="#/start">${ic('plus')}<span>Nouvel audit<small>zone, une ou plusieurs entreprises</small></span></a>` : ''}
     ${insps.length ? pulseCard(insps, month, avgPct, late.length, openActs) : ''}
+    ${teamCard}
     <div class="home-cols"><div class="home-main">
     <div class="section-head"><span>Audit rapide</span>${nActive ? `<span class="muted small">${nActive} entreprise${nActive > 1 ? 's' : ''}</span>` : ''}</div>
     ${cloud.can('audit') ? (subList.some(s => !s.archived) ? subGrid(subList, insps, acts) : noCompanyCard()) : '<div class="card muted">Votre accès ne permet pas de lancer des audits. Contactez l’administrateur HSE.</div>'}
@@ -542,6 +583,12 @@ async function vHome() {
     <div class="section-head"><span>${cloud.enabled && cloud.isAdmin() ? 'Audits de l’équipe' : cloud.enabled ? 'Mes audits' : 'Inspections récentes'}</span>${insps.length ? `<span class="muted small">${insps.length} au total</span>` : ''}</div>
     ${inspList(recent, subs) || '<div class="empty">Aucune inspection pour l’instant.<br>Touchez une entreprise pour commencer.</div>'}
     </div></div>`;
+  if (teamAdmin && navigator.onLine) cloud.team().then(async () => {
+    const html = await teamWeekCard(), box = view.querySelector('#team-week');
+    if (!view.isConnected) return;
+    if (box) box.previousElementSibling.outerHTML = '', box.outerHTML = html;
+    else if (html) view.querySelector('.home-cols')?.insertAdjacentHTML('beforebegin', html);
+  }).catch(() => {});
   // photo du chantier (plan) en fond du bandeau, logo du projet s'il existe
   (async () => {
     const plan = (await maps()).planList[0];
@@ -1565,7 +1612,9 @@ async function vActions(q) {
       const list = pool.filter(views[f.view]).sort(sorter);
       $('#abody').innerHTML = `
         <div class="tabs3">${[['todo', 'À faire'], ['late', 'En retard'], ['done', 'Clôturées']].map(([k, l]) => `<button data-view="${k}" class="${f.view === k ? 'on' : ''}">${l} <em>${pool.filter(views[k]).length}</em></button>`).join('')}</div>
-        ${list.map(a => actionCard(a, subs)).join('') || '<div class="empty">Rien à afficher</div>'}`;
+        ${list.map(a => actionCard(a, subs)).join('') || `<div class="empty">${!pool.length
+          ? 'Aucune action pour l’instant.<br><span class="muted small">Elles se créent automatiquement quand un critère est noté 0, 1 ou 2 pendant un audit.</span>'
+          : { todo: 'Rien à faire, tout est traité 👍', late: 'Aucune action en retard 👍', done: 'Aucune action clôturée pour l’instant.' }[f.view]}</div>`}`;
     }
   };
   const moveAction = async (id, status) => {
@@ -3065,6 +3114,7 @@ async function render() {
     const m = path.match(re);
     if (!m) continue;
     document.querySelectorAll('#tabbar a').forEach(a => a.classList.toggle('on', a.dataset.tab === tab));
+    lateBadge();
     try {
       const args = m.slice(1);
       await (args.length ? fn(...args, q) : fn(q));

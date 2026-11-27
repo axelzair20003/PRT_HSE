@@ -260,7 +260,7 @@ export async function team() {
   const [p, i] = await Promise.all([sb.from('profiles').select('*').order('name'), sb.from('invites').select('*').order('created_at')]);
   if (p.error) throw friendly(p.error);
   if (i.error) throw friendly(i.error);
-  await db.setMeta('profiles', Object.fromEntries(p.data.map(x => [x.id, { name: x.name, email: x.email }])));
+  await db.setMeta('profiles', Object.fromEntries(p.data.map(x => [x.id, { name: x.name, email: x.email, role: x.role, active: x.active, audit: !!x.perms?.audit }])));
   return { profiles: p.data, invites: i.data };
 }
 export async function invite(email, name, role = 'inspector', perms = null, projects = null) {

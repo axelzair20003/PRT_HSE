@@ -301,3 +301,26 @@ label.f { font-weight: 500; font-size: 14px; color: var(--muted); }
 .scores button.on[data-v="4"], :root[data-theme="dark"] .scores button.on[data-v="4"] { background: #2E7D32; color: #fff; }
 .scores button.on[data-v="5"], :root[data-theme="dark"] .scores button.on[data-v="5"] { background: #1B5E20; color: #fff; }
 .scores button.on[data-v="NA"], :root[data-theme="dark"] .scores button.on[data-v="NA"] { background: var(--brand); color: #fff; }
+
+/* infos membre : texte d'information, pas un lien */
+.member-meta { color: var(--muted); font-weight: 600; }
+
+/* badge « en retard » sur l'onglet Actions */
+#tabbar a { position: relative; }
+.tab-badge { position: absolute; top: 6px; left: calc(50% + 6px); min-width: 19px; height: 19px; padding: 0 5px; border-radius: 10px; background: #C62828; color: #fff; font: 700 11.5px/19px var(--font, inherit); font-style: normal; text-align: center; box-shadow: 0 0 0 2px var(--surface); }
+@media (min-width: 1024px) { .tab-badge { position: static; margin-left: auto; box-shadow: none; } }
+
+/* carte « Équipe cette semaine » (admin) */
+.team-week { padding: 4px 0; }
+.tw-row { display: flex; align-items: center; gap: 12px; min-height: 60px; padding: 8px 14px; color: var(--ink); text-decoration: none; }
+.tw-row + .tw-row { border-top: 1px solid var(--line); }
+.tw-row .grow { min-width: 0; display: grid; }
+.tw-row b.ellip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tw-row small { font-size: 13.5px; }
+.tw-av { flex: none; width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; background: var(--brand); color: #fff; font-weight: 700; font-size: 14px; }
+.tw-n { display: grid; justify-items: center; min-width: 44px; }
+.tw-n b { font-size: 20px; line-height: 1; }
+.tw-n small { font-size: 11.5px; color: var(--muted); }
+.tw-idle { color: #B45309; font-weight: 600; }
+.tw-warn { color: #B45309; font-weight: 700; font-size: 13.5px; }
+.tw-row > .ic { color: var(--muted); flex: none; }
