@@ -10,7 +10,7 @@ import { SEED_SUBS, SEED_LOCATIONS, SEED_PLAN, SEED_SITE, SEED_PROJECT, loadSeed
 import { CRIT_FR, THEME_FR, TXT as RTXT, RATING_FR, RANGE_FR } from './report-fr.js';
 import { REPORT_DEFAULTS, REPORT_TITLES, buildXLSX, buildPDF, shareFile, download, canShareFile, actionRef } from './export.js';
 
-export const APP_VERSION = '4.1.1';
+export const APP_VERSION = '4.2.0';
 
 // ---------- utilitaires ----------
 const $ = (s, el = document) => el.querySelector(s);
@@ -165,6 +165,10 @@ async function homeNotices(nAudits) {
   if (!isStandalone() && !(snooze.install > now) && (ios || installEvt)) out.push(`<div class="card notice" data-notice="install"><span class="notice-ic">${ic('download', 20)}</span>
     <span class="grow"><b>Installez l’app sur l’écran d’accueil</b><span class="muted small">${ios ? 'Touchez Partager ⬆︎ puis « Sur l’écran d’accueil ». ' : ''}Elle s’ouvre plus vite, en plein écran, et vos audits restent protégés.</span></span>
     ${installEvt ? '<button class="btn primary small-btn" data-inst>Installer</button>' : ''}<button class="notice-x" data-snooze="install" aria-label="Plus tard">${ic('x', 18)}</button></div>`);
+  const rej = cloud.enabled ? await cloud.rejected() : [];
+  if (rej.length) out.push(`<div class="card notice warn" data-notice="rejected"><span class="notice-ic">${ic('alert', 20)}</span>
+    <span class="grow"><b>${rej.length} élément${rej.length > 1 ? 's' : ''} non envoyé${rej.length > 1 ? 's' : ''} : prévenez l’admin HSE</b><span class="muted small">Vos droits ont changé (projet, actions…). Ils restent sur ce téléphone : prévenez l’administrateur HSE.</span></span>
+    <button class="notice-x" data-rej aria-label="Masquer">${ic('x', 18)}</button></div>`);
   if (!cloud.enabled && nAudits) {
     const last = await db.getMeta('lastBackup');
     const days = last ? Math.floor((now - new Date(last)) / 864e5) : null;
@@ -179,6 +183,7 @@ function bindNotices() {
     const sn = await db.getMeta('noticeSnooze', {}); sn[b.dataset.snooze] = Date.now() + (b.dataset.snooze === 'install' ? 7 : 3) * 864e5;
     await db.setMeta('noticeSnooze', sn); b.closest('.notice').remove();
   });
+  view.querySelector('[data-rej]')?.addEventListener('click', async e => { await cloud.clearRejected(); e.target.closest('.notice')?.remove(); });
   view.querySelector('[data-bk]')?.addEventListener('click', async e => { await backupNow(); e.target.closest('.notice')?.remove(); });
   view.querySelector('[data-inst]')?.addEventListener('click', async () => { if (!installEvt) return; installEvt.prompt(); const r = await installEvt.userChoice.catch(() => null); installEvt = null; if (r?.outcome === 'accepted') view.querySelector('[data-notice=install]')?.remove(); });
 }
@@ -2544,11 +2549,13 @@ async function vSettings() {
     <h2>Sauvegarde</h2>
     <button class="btn block" id="bk" style="margin-bottom:10px">${ic('download')} Sauvegarde complète (JSON)</button>
     ${cloud.enabled ? '' : `<label class="btn block danger">${ic('upload')} Restaurer une sauvegarde<input type="file" accept="application/json,.json" class="hidden-input" id="rs"></label>`}
-    ${cloud.enabled ? `<button class="btn block danger" id="logout" style="margin-top:20px">Se déconnecter</button>` : ''}
+    ${cloud.enabled ? `<button class="btn block" id="pw" style="margin-top:20px">${ic('lock')} Changer mon mot de passe</button>
+    <button class="btn block danger" id="logout" style="margin-top:10px">Se déconnecter</button>` : ''}
     <p class="muted small" style="margin-top:14px">${cloud.enabled ? 'Données envoyées automatiquement au serveur HSE' : 'Données stockées uniquement sur cet appareil'}${est ? ' · ' + est : ''}${cloud.enabled ? '' : ` · stockage ${persisted ? 'persistant' : 'non garanti — faites des sauvegardes régulières'}`}.<br>
     Version ${APP_VERSION} · fonctionne hors ligne.</p>`;
   drawSync();
   $('#sync-now')?.addEventListener('click', () => cloud.sync());
+  $('#pw')?.addEventListener('click', () => passwordSheet());
   $('#logout')?.addEventListener('click', async () => {
     if (!await confirmBox('Se déconnecter ?', 'Les données de ce téléphone seront effacées après envoi au serveur.', 'Se déconnecter')) return;
     try { await cloud.signOut(); location.hash = '#/'; location.reload(); } catch (e) { toast(e.message, 5000); }
@@ -2613,7 +2620,7 @@ async function shareInvite(email, name, code) {
   // le code d'invitation protège le compte : sans lui, personne d'autre ne peut créer le compte à cette adresse
   if (!code) code = (await cloud.inviteCode(email).catch(() => null)) || '';
   const link = inviteLink(email, name, code);
-  const text = `Bonjour${name ? ' ' + name.split(' ')[0] : ''}, voici ton accès à l’application ${BRAND.name} : ${link}\n1. Ouvre le lien dans Safari\n2. « Créer mon compte » avec ${email}${code ? ` (code d’invitation : ${code})` : ''}\n3. Partager → « Sur l’écran d’accueil »\nCe lien est personnel : ne le transfère pas.`;
+  const text = `Bonjour${name ? ' ' + name.split(' ')[0] : ''}, voici ton accès à l’application ${BRAND.name} : ${link}\n1. Ouvre le lien dans Safari\n2. « Créer mon compte » avec ${email}${code ? ` (code d’invitation : ${code})` : ''}\n3. Partager → « Sur l’écran d’accueil »\n4. Ouvre l’app depuis l’écran d’accueil → « Se connecter » (même email et mot de passe)\nCe lien est personnel : ne le transfère pas.`;
   openSheet(`<h3>Invitation prête</h3>
     <p class="muted">Envoyez ce lien à <b>${esc(name || email)}</b> uniquement : il contient son code d’invitation personnel${code ? ` (<b>${esc(code)}</b>)` : ''}.</p>
     <div class="invite-link">${esc(link)}</div>
@@ -2624,6 +2631,22 @@ async function shareInvite(email, name, code) {
   (el, close) => {
     el.querySelector('[data-s]')?.addEventListener('click', async () => { try { await navigator.share({ title: 'Accès ' + BRAND.name, text }); close(); } catch { /* annulé */ } });
     el.querySelector('[data-c]').onclick = async () => { try { await navigator.clipboard.writeText(text); toast('Message copié'); } catch { toast('Copie impossible'); } };
+  });
+}
+function passwordSheet() {
+  openSheet(`<h3>Changer mon mot de passe</h3>
+    <form id="pwf"><label class="f" for="pw1">Nouveau mot de passe</label><input class="in" id="pw1" type="password" autocomplete="new-password" minlength="8" required>
+    <label class="f" for="pw2">Confirmer</label><input class="in" id="pw2" type="password" autocomplete="new-password" minlength="8" required>
+    <p class="login-err" id="pwe"></p>
+    <div style="display:grid;gap:10px"><button class="btn primary block">Enregistrer</button><button type="button" class="btn block" data-close>Annuler</button></div></form>`, (el, close) => {
+    el.querySelector('#pwf').onsubmit = async e => {
+      e.preventDefault();
+      const a = el.querySelector('#pw1').value, b = el.querySelector('#pw2').value, err = el.querySelector('#pwe');
+      if (a.length < 8) { err.textContent = '8 caractères minimum.'; return; }
+      if (a !== b) { err.textContent = 'Les deux mots de passe sont différents.'; return; }
+      if (!navigator.onLine) { err.textContent = 'Connexion internet nécessaire.'; return; }
+      try { await cloud.changePassword(a); close(); toast('Mot de passe changé'); } catch (x) { err.textContent = x.message; }
+    };
   });
 }
 function accessForm(state, projects) {
@@ -2730,6 +2753,7 @@ async function vMember(id) {
     ${p.id === cloud.uid() ? '<div class="card small">C’est votre compte : vos droits d’administrateur ne peuvent pas être modifiés ici.</div>' : `
     <div class="card">${accessForm(state, projects)}</div>
     <p class="muted small" style="text-align:center">Enregistrement automatique · effet à la prochaine ouverture de l’app</p>
+    ${p.role === 'admin' ? '' : `<button class="btn block" id="m-pw" style="margin-bottom:10px">${ic('lock')} Mot de passe oublié → en créer un provisoire</button>`}
     <button class="btn block ${p.active ? 'danger' : 'primary'}" id="m-act">${p.active ? 'Bloquer l’accès' : 'Réactiver l’accès'}</button>`}`;
   if (p.id === cloud.uid()) return;
   const save = debounce(async () => {
@@ -2737,6 +2761,19 @@ async function vMember(id) {
   }, 600);
   onCleanup(() => save.flush && pendingSaves.has(save) && save.flush());
   bindAccessForm(state, save);
+  $('#m-pw')?.addEventListener('click', async () => {
+    const pw = 'HSE-' + Array.from(crypto.getRandomValues(new Uint8Array(6)), b => 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'[b % 31]).join('');
+    if (!await confirmBox('Créer un mot de passe provisoire ?', `${esc(p.name || p.email)} ne pourra plus utiliser son ancien mot de passe.`, 'Créer', 'primary')) return;
+    try { await cloud.adminSetPassword(id, pw); } catch (e) { toast(e.message, 5000); return; }
+    const text = `Ton mot de passe provisoire pour ${BRAND.name} : ${pw}\nConnecte-toi avec ${p.email}, puis Réglages → « Changer mon mot de passe ».`;
+    openSheet(`<h3>Mot de passe provisoire</h3><p class="muted">À transmettre à <b>${esc(p.name || p.email)}</b> uniquement.</p>
+      <div class="invite-link" style="font-size:1.3rem;text-align:center;letter-spacing:.06em">${esc(pw)}</div>
+      <div style="display:grid;gap:10px;margin-top:12px">${navigator.share ? `<button class="btn primary block" data-s>${ic('share')} Envoyer</button>` : ''}
+      <button class="btn block" data-c>Copier le message</button><button class="btn block" data-close>Fermer</button></div>`, (el, close) => {
+      el.querySelector('[data-s]')?.addEventListener('click', async () => { try { await navigator.share({ text }); close(); } catch { /* annulé */ } });
+      el.querySelector('[data-c]').onclick = async () => { try { await navigator.clipboard.writeText(text); toast('Message copié'); } catch { toast('Copie impossible'); } };
+    });
+  });
   $('#m-act').onclick = async () => {
     if (p.active && !await confirmBox('Bloquer cet accès ?', 'La personne ne pourra plus envoyer ni consulter de données. Ses audits restent visibles pour vous.', 'Bloquer')) return;
     try { await cloud.setActive(id, !p.active); render(); } catch (e) { toast(e.message, 4000); }
@@ -3183,9 +3220,11 @@ function showLogin() {
           <button class="btn primary big" id="l-go">${label()}</button>
         </form>
         ${mode === 'up' && !invited ? '<button type="button" class="btn ghost small" id="l-hascode" style="margin-top:16px">J’ai reçu un code d’invitation</button>' : ''}
+        ${mode === 'in' ? '<button type="button" class="btn ghost small" id="l-forgot" style="margin-top:16px">Mot de passe oublié ?</button>' : ''}
         <p class="muted small login-foot">${mode === 'up' ? 'Réservé aux adresses autorisées par l’administrateur HSE.' : 'Accès sur invitation · une seule connexion par téléphone.'}</p>
       </div>`;
     view.querySelector('.tabs3').onclick = e => { const b = e.target.closest('[data-m]'); if (b) { mode = b.dataset.m; draw(); } };
+    if ($('#l-forgot')) $('#l-forgot').onclick = () => ask('Mot de passe oublié', 'Demandez à l’administrateur HSE : il vous crée un <b>mot de passe provisoire</b> depuis l’app (Équipe et accès). Connectez-vous avec, puis changez-le dans <b>Réglages → Changer mon mot de passe</b>.', [{ label: 'Compris', value: true, cls: 'primary' }]);
     if ($('#l-hascode')) $('#l-hascode').onclick = () => { invited = true; $('#l-inv').hidden = false; $('#l-hascode').remove(); $('#l-name').focus(); };
     $('#lf').onsubmit = async e => {
       e.preventDefault();

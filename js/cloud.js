@@ -74,6 +74,16 @@ export async function signUp(email, password, name, code = '') {
   if (!data.session) throw new Error('Compte créé, mais Supabase demande une confirmation par email : désactivez « Confirm email » (voir guide).');
   session = data.session; await loadProfile(); await afterLogin();
 }
+/** Changer son propre mot de passe (connecté) */
+export async function changePassword(pw) {
+  const { error } = await sb.auth.updateUser({ password: pw });
+  if (error) throw friendly(error);
+}
+/** Admin : mot de passe provisoire pour un inspecteur qui l'a oublié (pas besoin d'email) */
+export async function adminSetPassword(id, pw) {
+  const { error } = await sb.rpc('admin_set_password', { target: id, new_password: pw });
+  if (error) throw friendly(error);
+}
 export async function signOut() {
   try { await sync(); } catch { /* on déconnecte quand même */ }
   const left = await db.outboxCount(Object.keys(KIND));
@@ -145,24 +155,38 @@ async function push() {
     const rec = await db.get(store, recordId);
     if (!rec || (ADMIN_ONLY.includes(store) && !isAdmin())) { done.push(...seqs); continue; }
     const owner = rec.owner || uid();
-    for (const id of photosOf(store, rec).filter(Boolean)) await uploadBlob(id, blobPath(store, owner, id));
-    const { error } = await sb.from('docs').upsert({
-      id: rec.id, kind: KIND[store], owner, project: store === 'projects' ? rec.id : (rec.projectId || null),
-      data: { ...rec, owner }, updated_at: rec.updatedAt || new Date().toISOString(), deleted: !!rec.deleted,
-    });
-    if (error) throw error;
-    // aperçu de l'audit (sans notes détaillées, commentaires ni photos) : visible des HSE qui ont le droit « aperçu équipe »
-    if (store === 'inspections') {
-      const { error: e2 } = await sb.from('docs').upsert({
-        id: 'sum-' + rec.id, kind: 'summary', owner, project: rec.projectId || null,
-        data: summaryOf(rec), updated_at: rec.updatedAt || new Date().toISOString(), deleted: !!rec.deleted,
+    try {
+      for (const id of photosOf(store, rec).filter(Boolean)) await uploadBlob(id, blobPath(store, owner, id));
+      const { error } = await sb.from('docs').upsert({
+        id: rec.id, kind: KIND[store], owner, project: store === 'projects' ? rec.id : (rec.projectId || null),
+        data: { ...rec, owner }, deleted: !!rec.deleted,
       });
-      if (e2) throw e2;
+      if (error) throw error;
+      // aperçu de l'audit (sans notes détaillées, commentaires ni photos) : visible des HSE qui ont le droit « aperçu équipe »
+      if (store === 'inspections') {
+        const { error: e2 } = await sb.from('docs').upsert({
+          id: 'sum-' + rec.id, kind: 'summary', owner, project: rec.projectId || null, data: summaryOf(rec), deleted: !!rec.deleted,
+        });
+        if (e2) throw e2;
+      }
+      done.push(...seqs);
+    } catch (e) {
+      if (!refused(e)) { await db.outboxClear(done); throw e; }        // réseau : on réessaiera plus tard
+      await loadProfile();
+      if (profile && profile.active === false) { await db.outboxClear(done); throw new Error('Votre accès a été bloqué par l’administrateur HSE. Vos audits restent sur ce téléphone.'); }
+      // refusé par le serveur (droits retirés, projet non autorisé…) : on le met de côté au lieu de bloquer tout l'envoi
+      const rej = await db.getMeta('rejected', {});
+      rej[store + '|' + recordId] = { store, id: recordId, ref: rec.ref || rec.title || rec.name || '', at: new Date().toISOString() };
+      await db.setMeta('rejected', rej);
+      done.push(...seqs);
     }
-    done.push(...seqs);
   }
   await db.outboxClear(done);
 }
+const refused = e => /row-level security|permission denied|42501|violates|not allowed|unauthorized|403/i.test(`${e?.code || ''} ${e?.message || ''} ${e?.statusCode || ''}`);
+/** Éléments refusés par le serveur (à signaler à l'admin) */
+export async function rejected() { return Object.values(await db.getMeta('rejected', {})); }
+export async function clearRejected() { await db.setMeta('rejected', {}); }
 
 function summaryOf(i) {
   const o = overallScore(i.scores || {}, i.bonus, i.penalty);
@@ -202,15 +226,15 @@ async function pull() {
   for (;;) {
     const { data, error } = await sb.from('docs').select('*').gt('updated_at', since).order('updated_at').limit(500);
     if (error) throw error;
+    const pendingSet = new Set((await db.outboxAll()).map(o => o.store + '|' + o.recordId));
     for (const row of data) {
       if (row.kind === 'summary') {
         if (!isAdmin() && row.owner !== uid()) { team[row.data.id] = { ...row.data, owner: row.owner, deleted: row.deleted, updatedAt: row.updated_at }; }
         since = row.updated_at; continue;
       }
       const store = STORE[row.kind];
-      const local = await db.get(store, row.id);
-      const pending = (await db.outboxAll()).some(o => o.store === store && o.recordId === row.id);
-      if (!pending && (!local || (local.updatedAt || '') <= row.updated_at)) {
+      if (!store) { since = row.updated_at; continue; }
+      if (!pendingSet.has(store + '|' + row.id)) {
         await db.putRaw(store, { ...row.data, owner: row.owner, deleted: row.deleted, updatedAt: row.updated_at });
       }
       for (const id of photosOf(store, row.data).filter(Boolean)) paths[id] = blobPath(store, row.owner, id);

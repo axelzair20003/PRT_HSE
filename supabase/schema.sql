@@ -112,41 +112,38 @@ alter table public.docs     enable row level security;
 
 drop policy if exists "invites: admin" on public.invites;
 create policy "invites: admin" on public.invites
-  for all using (app_private.is_admin()) with check (app_private.is_admin());
+  for all to authenticated using ((select app_private.is_admin())) with check ((select app_private.is_admin()));
 
 drop policy if exists "profiles: lecture" on public.profiles;
 create policy "profiles: lecture" on public.profiles
-  for select using (id = auth.uid() or app_private.is_admin());
+  for select to authenticated using (id = (select auth.uid()) or (select app_private.is_admin()));
 
 drop policy if exists "profiles: admin modifie" on public.profiles;
 create policy "profiles: admin modifie" on public.profiles
-  for update using (app_private.is_admin()) with check (app_private.is_admin());
+  for update to authenticated using ((select app_private.is_admin())) with check ((select app_private.is_admin()));
 
 drop policy if exists "docs: lecture" on public.docs;
 create policy "docs: lecture" on public.docs
-  for select using (
-    app_private.is_active() and (
-      kind = 'sub' or owner = auth.uid() or app_private.is_admin()
-      -- plans et projets : seulement ceux des projets autorisés
+  for select to authenticated using (
+    (select app_private.is_active()) and (
+      kind = 'sub' or owner = (select auth.uid()) or (select app_private.is_admin())
       or (kind in ('plan', 'project') and app_private.can_project(project))
-      -- aperçu des audits de l'équipe (date, zone, entreprise, score — sans le détail)
-      or (kind = 'summary' and app_private.has_perm('team') and app_private.can_project(project))
-      -- actions relevées par les autres HSE (l'app n'affiche que celles encore ouvertes)
-      or (kind = 'action' and app_private.has_perm('teamActions') and app_private.can_project(project))
+      or (kind = 'summary' and (select app_private.has_perm('team')) and app_private.can_project(project))
+      or (kind = 'action' and (select app_private.has_perm('teamActions')) and app_private.can_project(project))
     )
   );
 
 drop policy if exists "docs: création" on public.docs;
 create policy "docs: création" on public.docs
-  for insert with check (
-    app_private.is_active() and ((kind in ('inspection', 'action', 'summary') and owner = auth.uid() and app_private.can_project(project)) or app_private.is_admin())
+  for insert to authenticated with check (
+    (select app_private.is_active()) and ((kind in ('inspection', 'action', 'summary') and owner = (select auth.uid()) and app_private.can_project(project)) or (select app_private.is_admin()))
   );
 
 drop policy if exists "docs: modification" on public.docs;
 create policy "docs: modification" on public.docs
-  for update
-  using (app_private.is_active() and ((kind in ('inspection', 'action', 'summary') and owner = auth.uid()) or app_private.is_admin()))
-  with check (app_private.is_active() and ((kind in ('inspection', 'action', 'summary') and owner = auth.uid() and app_private.can_project(project)) or app_private.is_admin()));
+  for update to authenticated
+  using ((select app_private.is_active()) and ((kind in ('inspection', 'action', 'summary') and owner = (select auth.uid())) or (select app_private.is_admin())))
+  with check ((select app_private.is_active()) and ((kind in ('inspection', 'action', 'summary') and owner = (select auth.uid()) and app_private.can_project(project)) or (select app_private.is_admin())));
 -- pas de suppression physique : l'app marque deleted = true
 
 -- ---------- Stockage des fichiers ----------
@@ -211,6 +208,30 @@ revoke execute on function app_private.handle_new_user() from public, anon, auth
 revoke execute on function app_private.set_updated_at() from public, anon, authenticated;
 revoke execute on function app_private.is_admin(), app_private.can_project(text), app_private.has_perm(text), app_private.is_active() from public, anon;
 grant execute on function app_private.is_admin(), app_private.can_project(text), app_private.has_perm(text), app_private.is_active() to authenticated;
+
+-- ---------- Mot de passe oublié : l'admin donne un mot de passe provisoire (pas besoin d'email) ----------
+create or replace function app_private.set_password(target uuid, new_password text) returns void
+language plpgsql security definer set search_path = '' as $$
+begin
+  if not app_private.is_admin() then raise exception 'réservé à l''administrateur'; end if;
+  if length(coalesce(new_password, '')) < 8 then raise exception 'mot de passe trop court'; end if;
+  if exists (select 1 from public.profiles where id = target and role = 'admin') then
+    raise exception 'compte administrateur : à réinitialiser depuis Supabase';
+  end if;
+  update auth.users set encrypted_password = extensions.crypt(new_password, extensions.gen_salt('bf')), updated_at = now()
+  where id = target;
+  if not found then raise exception 'compte introuvable'; end if;
+end;
+$$;
+revoke execute on function app_private.set_password(uuid, text) from public, anon;
+grant execute on function app_private.set_password(uuid, text) to authenticated;
+
+create or replace function public.admin_set_password(target uuid, new_password text) returns void
+language sql security invoker set search_path = '' as $$
+  select app_private.set_password(target, new_password);
+$$;
+revoke execute on function public.admin_set_password(uuid, text) from public, anon;
+grant execute on function public.admin_set_password(uuid, text) to authenticated;
 
 -- ---------- Premier administrateur ----------
 -- L'admin reçoit lui aussi un code personnel : personne d'autre ne peut créer son compte à sa place.

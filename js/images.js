@@ -5,7 +5,7 @@ function loadImg(src) {
 }
 
 /** Redimensionne et compresse une image (photo iPhone) en JPEG */
-export async function compressImage(file, maxSide = 1600, quality = 0.72) {
+export async function compressImage(file, maxSide = 1280, quality = 0.72) {
   const url = URL.createObjectURL(file);
   try {
     const img = await loadImg(url);
